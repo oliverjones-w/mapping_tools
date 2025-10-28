@@ -1,0 +1,17 @@
+# Python Virtual Environment
+# This is the most important line. It ignores your entire
+# venv folder with all its thousands of files.
+/.venv/
+
+# Python Cache
+# These are temporary folders Python creates
+__pycache__/
+*.pyc
+
+# VSCode Editor Settings
+# Ignores your personal editor settings
+.vscode/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
