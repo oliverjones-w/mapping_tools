@@ -82,15 +82,16 @@ def load_master_persons_map() -> Optional[Dict[str, List[Dict[str, Any]]]]:
         print(f"An error occurred loading {MASTER_PERSONS_FILE}: {e}")
         return None
 
-def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str]]]:
+def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str], set]]:
     """
-    Loads the firm aliases JSON and builds two maps.
+    Loads the firm aliases JSON and builds three maps.
     1. alias_map: 'alias' -> 'canonical_name' (for data comparison)
     2. id_map: 'alias' -> 'id' (for folder organization)
+    3. blacklist_set: a 'normalized_alias' -> True set (for fast skipping)
     """
     if not os.path.exists(FIRM_ALIASES_FILE):
         print(f"Error: Firm aliases file not found: {FIRM_ALIASES_FILE}")
-        return None, None
+        return None, None, None
         
     print(f"Loading firm aliases from {FIRM_ALIASES_FILE}...")
     try:
@@ -99,10 +100,11 @@ def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str]]]:
             
         if not isinstance(firm_list, list):
             print(f"Error: {FIRM_ALIASES_FILE} is not a JSON list as expected.")
-            return None, None
+            return None, None, None
 
         alias_map: Dict[str, str] = {}
         id_map: Dict[str, str] = {}
+        blacklist_set: set = set() # <-- NEW SET
         
         for firm_obj in firm_list:
             canonical_name = firm_obj.get("canonical")
@@ -114,6 +116,14 @@ def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str]]]:
                 
             aliases = firm_obj.get("aliases", [])
             platforms = firm_obj.get("platforms", [])
+            
+            # --- NEW BLACKLIST LOGIC ---
+            # Add all blacklisted names from this firm to the global set
+            blacklist_names = firm_obj.get("blacklist", [])
+            for name in blacklist_names:
+                if not name: continue
+                blacklist_set.add(normalize_string(name))
+            # --- END NEW BLACKLIST LOGIC ---
             
             # Create a single list of all possible names for this firm
             all_names_to_map = [canonical_name] + aliases + platforms
@@ -137,14 +147,16 @@ def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str]]]:
 
         print(f"Loaded {len(alias_map)} aliases into alias_map.")
         print(f"Loaded {len(id_map)} aliases into id_map.")
-        return alias_map, id_map
+        print(f"Loaded {len(blacklist_set)} names into global blacklist_set.") # <-- NEW
+        return alias_map, id_map, blacklist_set
         
     except json.JSONDecodeError:
         print(f"Error: Could not decode JSON from {FIRM_ALIASES_FILE}.")
-        return None, None
+        return None, None, None
     except Exception as e:
         print(f"An error occurred loading {FIRM_ALIASES_FILE}: {e}")
-        return None, None
+        return None, None, None
+
 
 def get_discrepancy_key(row_dict: Dict[str, Any]) -> tuple:
     """
@@ -188,7 +200,7 @@ def flatten_discrepancies(discrepancies_json: List[Dict[str, Any]]) -> Dict[tupl
     return flat_map
 
 
-def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]], alias_map: Dict[str, str]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]], alias_map: Dict[str, str], blacklist_set: set) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Processes a single new data file and compares it against the master map.
     Returns a tuple of (found_matches, found_discrepancies, found_additions).
@@ -207,11 +219,20 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
     discrepancy_count = 0
 
     try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:  # 'utf-8-sig' handles potential BOM
+        with open(filepath, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             
             for row in reader:
                 processed_count += 1
+                
+                # --- NEW: BLACKLIST CHECK ---
+                # Get the company name from the new file
+                new_company_name = row.get('Company')
+                
+                # Check if the company is blacklisted
+                if new_company_name and (normalize_string(new_company_name) in blacklist_set):
+                    continue # Skip this row entirely
+                # --- END BLACKLIST CHECK ---
                 
                 # --- BEGIN REVISED NAME LOGIC ---
                 new_name = None
@@ -240,12 +261,11 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                         if new_col == 'Name': continue
                         new_value = row.get(new_col)
                         
-                        # --- THIS IS THE UPDATED LOGIC BLOCK ---
                         if new_col == 'Company':
+                            # We already know new_value (new_company_name) is not blacklisted
                             normalized_new_company = normalize_string(new_value)
                             canonical_new_company = alias_map.get(normalized_new_company)
                             
-                            # This list will hold only records that *truly* match name AND firm
                             confirmed_firm_matches = [] 
                             
                             for master_record in master_records_list:
@@ -254,28 +274,20 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                                 firm_matches = False
                                 
                                 if canonical_new_company:
-                                    # Use alias map
                                     if normalize_string(canonical_new_company) == normalized_master_firm:
                                         firm_matches = True
                                 else:
-                                    # No alias, do direct comparison
                                     if normalized_new_company == normalized_master_firm:
                                         firm_matches = True
                                         
                                 if firm_matches:
-                                    # This record is a true match.
                                     confirmed_firm_matches.append(master_record)
                             
-                            # Now, check if we found any true matches
                             if confirmed_firm_matches:
-                                # Yes! This is a real match.
-                                # Add them to the main list and count this as one "match"
                                 found_matches.extend(confirmed_firm_matches)
                                 match_count += 1
                             
                             else:
-                                # No. This is a name match but a firm discrepancy.
-                                # Do NOT add to found_matches. Just log the discrepancy.
                                 has_discrepancy = True
                                 all_master_firms = list(set([mr.get('Firm', 'N/A') for mr in master_records_list]))
                                 alias_check_message = ""
@@ -290,11 +302,9 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                                     'alias_check': alias_check_message,
                                     'source_file': os.path.basename(filepath)
                                 }
-                        # --- END OF UPDATED LOGIC BLOCK ---
                         
                         # (You can add 'elif' blocks here for 'Title', 'Location' etc. if needed)
 
-                    # This block now correctly logs discrepancies *after* the for loop
                     if has_discrepancy:
                         discrepancy_count += 1
                         first_master_record = master_records_list[0]
@@ -308,9 +318,11 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                         
                 else:
                     # --- BEGIN NEW ADDITIONS LOGIC ---
-                    # This person is NOT in our master_map.
-                    # Check if they are at a verified firm.
-                    new_company_name = row.get('Company')
+                    # This code is only reached if:
+                    # 1. The company was NOT in the blacklist
+                    # 2. The person's name was NOT in the master_map
+                    
+                    # We can re-use new_company_name from the blacklist check
                     normalized_new_company = normalize_string(new_company_name)
                     canonical_new_company = alias_map.get(normalized_new_company)
                     
@@ -348,220 +360,220 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
 
 def main():
     # Load maps once
-    alias_map, id_map = load_firm_aliases_map()
+    alias_map, id_map, blacklist_set = load_firm_aliases_map()
     master_map = load_master_persons_map()
     
-    if not master_map or not alias_map or not id_map:
-        print("Critical Error: Could not load master persons map or firm alias maps. Exiting.")
-        return 1  # Return an error code
+    if not master_map or not alias_map or not id_map or blacklist_set is None:
+        print("Critical Error: Could not load master persons map, firm alias maps, or blacklist. Exiting.")
+        return 1
         
     if not os.path.exists(NEW_DATA_DIRECTORY):
         print(f"Error: 'new' data directory not found: {NEW_DATA_DIRECTORY}")
         return 1
         
-    csv_files_to_process = glob.glob(os.path.join(NEW_DATA_DIRECTORY, '*.csv'))
+    # --- NEW FILE DISCOVERY LOGIC ---
     
-    if not csv_files_to_process:
-        print(f"No .csv files found in {NEW_DATA_DIRECTORY}. Exiting.")
-        return 0  # Not an error, just nothing to do
-        
-    print(f"\nFound {len(csv_files_to_process)} .csv files to process...")
+    files_to_process = []
+    firms_with_new_files = set()
+    
+    # 1. Get all files from the "new" folder
+    new_csvs = glob.glob(os.path.join(NEW_DATA_DIRECTORY, '*.csv'))
+    
+    for file_path in new_csvs:
+        files_to_process.append(file_path)
+        # Find the firm_id for this file to prevent re-running it
+        file_name_without_ext = os.path.splitext(os.path.basename(file_path))[0]
+        firm_identifier = file_name_without_ext.split('_')[0]
+        normalized_base_name = normalize_string(firm_identifier)
+        archive_folder_name = id_map.get(normalized_base_name, firm_identifier)
+        if archive_folder_name:
+            firms_with_new_files.add(archive_folder_name)
+    
+    # 2. Get all existing firm IDs from the extraction root
+    all_firm_folders = [
+        d for d in os.listdir(BBG_EXTRACTION_ROOT)
+        if os.path.isdir(os.path.join(BBG_EXTRACTION_ROOT, d)) and d != 'new'
+    ]
+    
+    # 3. Find the latest archive file for firms *without* a new file
+    for firm_id in all_firm_folders:
+        if firm_id in firms_with_new_files:
+            print(f"Skipping archive check for {firm_id} (new file found).")
+            continue
+            
+        archive_folder = os.path.join(BBG_EXTRACTION_ROOT, firm_id, "archive")
+        if not os.path.exists(archive_folder):
+            continue
+            
+        archive_files = glob.glob(os.path.join(archive_folder, "*.csv"))
+        if archive_files:
+            latest_archive_file = max(archive_files, key=os.path.getmtime)
+            files_to_process.append(latest_archive_file)
+            print(f"Queueing latest archive file for {firm_id}: {os.path.basename(latest_archive_file)}")
 
-    # --- Removed all_found_matches ---
+    # --- END NEW FILE DISCOVERY LOGIC ---
+
+    if not files_to_process:
+        print(f"No .csv files found in {NEW_DATA_DIRECTORY} or archives. Exiting.")
+        return 0
+        
+    print(f"\nFound {len(files_to_process)} total files to process (new and re-run)...")
+
     total_files_processed = 0
     total_new_discrepancies = 0
-    total_resolved_discrepancies = 0
     total_new_additions = 0
+    total_new_matches = 0
     
-    # Process each file
-    for csv_file_path in csv_files_to_process:
+    # --- MAIN PROCESSING LOOP ---
+    for csv_file_path in files_to_process:
         
         # 1. PROCESS NEW FILE
-        # 'matches' now holds the confirmed matches for *this file only*
-        matches, new_discrepancies_json, new_additions_json = process_one_file(csv_file_path, master_map, alias_map)
-        
-        # --- BEGIN RECONCILIATION LOGIC ---
+        print(f"\n--- Processing: {csv_file_path} ---")
+        matches, new_discrepancies_json, new_additions_json = process_one_file(
+            csv_file_path, master_map, alias_map, blacklist_set
+        )
         
         # 2. GET PATHS
         csv_filename = os.path.basename(csv_file_path)
         file_name_without_ext = os.path.splitext(csv_filename)[0]
-        firm_identifier = file_name_without_ext.split('_')[0]
+        
+        is_new_file = os.path.normpath(os.path.dirname(csv_file_path)) == os.path.normpath(NEW_DATA_DIRECTORY)
+        
+        if is_new_file:
+            firm_identifier = file_name_without_ext.split('_')[0]
+        else:
+            firm_identifier = os.path.basename(os.path.dirname(os.path.dirname(csv_file_path)))
+        
         normalized_base_name = normalize_string(firm_identifier)
         archive_folder_name = id_map.get(normalized_base_name, firm_identifier)
         
+        if not archive_folder_name:
+            print(f"Warning: Could not find firm ID for '{firm_identifier}'. Skipping file '{csv_filename}'.")
+            continue
+            
         firm_root_folder = os.path.join(BBG_EXTRACTION_ROOT, archive_folder_name)
         firm_discrepancy_folder = os.path.join(firm_root_folder, "discrepancies")
         firm_archive_folder = os.path.join(firm_root_folder, "archive")
         firm_additions_folder = os.path.join(firm_root_folder, "additions")
-        # --- NEW: Confirmed Matches Folder ---
         firm_confirmed_folder = os.path.join(firm_root_folder, "confirmed_matches")
         
-        # Create all folders
         for folder in [firm_discrepancy_folder, firm_archive_folder, firm_additions_folder, firm_confirmed_folder]:
             if not os.path.exists(folder):
                 os.makedirs(folder)
         
-        # This is the single, persistent log file for the firm
+        # 3. WRITE DISCREPANCIES (OVERWRITE)
         master_log_path = os.path.join(firm_discrepancy_folder, f"{archive_folder_name}_discrepancies.csv")
-        
-        # This is a map of {key: row_dict} for all discrepancies found in the NEW file
-        current_findings_map = flatten_discrepancies(new_discrepancies_json)
-        
-        # 3. LOAD OLD MASTER DISCREPANCY LOG
-        updated_log_map = {}
-        headers = [
+        discrepancy_headers = [
             'Name', 'Master_Record_UIDs', 'Discrepancy_Field', 'New_File_Value', 
             'Master_File_Values', 'Alias_Check_Info', 'Source_File', 
             'Status', 'First_Seen', 'Last_Seen'
         ]
+        current_findings_list = list(flatten_discrepancies(new_discrepancies_json).values())
         
-        if os.path.exists(master_log_path):
-            print(f"Loading existing master log: {master_log_path}")
-            try:
-                with open(master_log_path, 'r', encoding='utf-8') as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        key = get_discrepancy_key(row)
-                        updated_log_map[key] = row
-            except Exception as e:
-                print(f"Warning: Could not read {master_log_path}. Will create a new one. Error: {e}")
+        try:
+            with open(master_log_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=discrepancy_headers)
+                writer.writeheader()
+                if current_findings_list:
+                    writer.writerows(current_findings_list)
+            print(f"Successfully saved {len(current_findings_list)} discrepancies to {master_log_path} (overwrite)")
+            total_new_discrepancies += len(current_findings_list)
+        except Exception as e:
+            print(f"Error writing master discrepancy log {master_log_path}: {e}")
 
-        # 4. RECONCILE DISCREPANCIES
-        today_str = str(date.today())
-        temp_new_discrepancies = 0
-        temp_resolved_discrepancies = 0
         
-        for key, new_row in current_findings_map.items():
-            if key in updated_log_map:
-                updated_log_map[key]['Status'] = 'Active'
-                updated_log_map[key]['Last_Seen'] = today_str
-                updated_log_map[key]['Master_File_Values'] = new_row['Master_File_Values']
-                updated_log_map[key]['Alias_Check_Info'] = new_row['Alias_Check_Info']
-                updated_log_map[key]['Source_File'] = new_row['Source_File']
-            else:
-                updated_log_map[key] = new_row
-                temp_new_discrepancies += 1
-
-        old_keys_to_check = list(updated_log_map.keys())
-        for key in old_keys_to_check:
-            if key not in current_findings_map:
-                if updated_log_map[key]['Status'] == 'Active':
-                    updated_log_map[key]['Status'] = 'Resolved'
-                    temp_resolved_discrepancies += 1
-        
-        # 5. WRITE THE NEW MASTER DISCREPANCY LOG
-        if updated_log_map:
-            try:
-                sorted_log_rows = sorted(
-                    updated_log_map.values(), 
-                    key=lambda r: (r['Status'] != 'Active', r['Name'])
-                )
-                with open(master_log_path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=headers)
-                    writer.writeheader()
-                    writer.writerows(sorted_log_rows)
-                
-                print(f"Reconciliation complete for {archive_folder_name}:")
-                print(f"  - {temp_new_discrepancies} new discrepancies logged.")
-                print(f"  - {temp_resolved_discrepancies} discrepancies marked as resolved.")
-                print(f"  - Master log saved: {master_log_path}")
-                total_new_discrepancies += temp_new_discrepancies
-                total_resolved_discrepancies += temp_resolved_discrepancies
-
-            except Exception as e:
-                print(f"Error writing master discrepancy log {master_log_path}: {e}")
-        
-        # 6. PROCESS ADDITIONS
+        # 4. WRITE ADDITIONS (OVERWRITE)
         master_additions_log_path = os.path.join(firm_additions_folder, f"{archive_folder_name}_additions.csv")
         additions_headers = [
             'Name', 'Company', 'Canonical_Company', 'Title', 
             'Location', 'Focus', 'Source_File', 'First_Seen'
         ]
-        
-        existing_additions = set()
-        if os.path.exists(master_additions_log_path):
-            try:
-                with open(master_additions_log_path, 'r', encoding='utf-8') as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        existing_additions.add(normalize_string(row.get('Name')))
-            except Exception as e:
-                print(f"Warning: Could not read {master_additions_log_path}. Error: {e}")
+        today_str = str(date.today())
+        for addition_row in new_additions_json:
+            addition_row['First_Seen'] = today_str
 
-        new_additions_to_write = []
-        for addition in new_additions_json:
-            norm_name = normalize_string(addition['Name'])
-            if norm_name not in existing_additions:
-                addition['First_Seen'] = today_str # Add the date
-                new_additions_to_write.append(addition)
-                existing_additions.add(norm_name) # Add to set to de-dupe from same file
+        try:
+            with open(master_additions_log_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=additions_headers)
+                writer.writeheader()
+                if new_additions_json:
+                    writer.writerows(new_additions_json)
+            print(f"Successfully saved {len(new_additions_json)} additions to {master_additions_log_path} (overwrite)")
+            total_new_additions += len(new_additions_json)
+        except Exception as e:
+            print(f"Error writing additions CSV {master_additions_log_path}: {e}")
         
-        if new_additions_to_write:
-            file_exists = os.path.exists(master_additions_log_path)
-            try:
-                with open(master_additions_log_path, 'a', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=additions_headers)
-                    if not file_exists:
-                        writer.writeheader()
-                    writer.writerows(new_additions_to_write)
-                
-                print(f"Successfully appended {len(new_additions_to_write)} new additions to {master_additions_log_path}")
-                total_new_additions += len(new_additions_to_write)
-            
-            except Exception as e:
-                print(f"Error appending to additions CSV {master_additions_log_path}: {e}")
-        
-        # --- NEW SECTION: 7. PROCESS CONFIRMED MATCHES ---
-        
-        # 'matches' is the list of master records from process_one_file
+        # 5. WRITE CONFIRMED MATCHES (OVERWRITE)
         if matches:
             master_matches_log_path = os.path.join(firm_confirmed_folder, f"{archive_folder_name}_matches.csv")
-            
-            # Get headers from the first record (assumes all records are the same)
             matches_headers = list(matches[0].keys())
             
             try:
-                # 'w' (write/overwrite) this file. It only reflects
-                # matches found in the *last processed file*.
                 with open(master_matches_log_path, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.DictWriter(f, fieldnames=matches_headers)
                     writer.writeheader()
                     writer.writerows(matches)
-                
-                print(f"Successfully saved {len(matches)} confirmed matches to {master_matches_log_path}")
-
+                print(f"Successfully saved {len(matches)} confirmed matches to {master_matches_log_path} (overwrite)")
+                total_new_matches += len(matches)
             except Exception as e:
                 print(f"Error writing confirmed matches CSV {master_matches_log_path}: {e}")
         
-        # --- END NEW SECTION ---
+        # --- MODIFIED: 6. ARCHIVE THE PROCESSED SOURCE FILE (if it was new) ---
+        if is_new_file:
+            try:
+                _ , ext = os.path.splitext(csv_filename)
+                file_name_base = os.path.splitext(csv_filename)[0] # e.g., 'citadel_20251028'
+                firm_part = file_name_base.split('_')[0]
+                date_part = file_name_base.replace(f"{firm_part}_", "") # e.g., '20251028'
+                
+                if not date_part: # Handle case like 'citadel.csv'
+                    raise ValueError("No date part in filename")
+                
+                # Try to parse YYYYMMDD and format as YYYY-MM-DD
+                parsed_date = datetime.strptime(date_part, '%Y%m%d')
+                new_archive_filename = f"{parsed_date.strftime('%Y-%m-%d')}{ext}" # e.g., '2025-10-28.csv'
 
-        # 8. ARCHIVE THE PROCESSED SOURCE FILE (was 7)
-        try:
-            now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            _ , ext = os.path.splitext(csv_filename)
-            new_archive_filename = f"{now_str}{ext}"
-            destination_path = os.path.join(firm_archive_folder, new_archive_filename)
-            shutil.move(csv_file_path, destination_path)
-            print(f"Successfully moved '{csv_filename}' to archive as '{new_archive_filename}'\n")
-            total_files_processed += 1
-        except Exception as e:
-            print(f"Error moving file {csv_filename}: {e}\n")
+            except ValueError:
+                # Fallback: Can't parse date, just use the non-firm part
+                # e.g., 'citadel_extra_info_file.csv' -> 'extra_info_file.csv'
+                file_name_base = os.path.splitext(csv_filename)[0]
+                firm_part = file_name_base.split('_')[0]
+                archive_name_base = file_name_base.replace(f"{firm_part}_", "")
+                _ , ext = os.path.splitext(csv_filename)
+                
+                if not archive_name_base: # Fallback for 'citadel.csv'
+                    new_archive_filename = f"{datetime.now().strftime('%Y-%m-%d')}{ext}"
+                else:
+                    new_archive_filename = f"{archive_name_base}{ext}"
+
+            # Now, move the file
+            try:
+                destination_path = os.path.join(firm_archive_folder, new_archive_filename)
+                
+                if os.path.exists(destination_path):
+                    print(f"Warning: Archive file '{new_archive_filename}' already exists. Skipping move.")
+                else:
+                    shutil.move(csv_file_path, destination_path)
+                    print(f"Successfully moved '{csv_filename}' to archive as '{new_archive_filename}'\n")
+                
+                total_files_processed += 1
             
-        # --- END RECONCILIATION LOGIC ---
-
-    # --- REMOVED Save consolidated results ---
+            except Exception as e:
+                print(f"Error moving file {csv_filename}: {e}\n")
         
+        else:
+            print(f"Successfully re-processed '{csv_filename}' from archive. No move needed.\n")
+            total_files_processed += 1
+            
     # --- Print summary ---
     print("\n--- Grand Total Summary ---")
-    print(f"Processed {total_files_processed} files.")
-    # --- REMOVED Total unique master records ---
-    print(f"Total NEW discrepancies found:      {total_new_discrepancies} (appended to logs)")
-    print(f"Total RESOLVED discrepancies found: {total_resolved_discrepancies} (updated in logs)")
-    print(f"Total NEW additions found:          {total_new_additions} (appended to logs)")
+    print(f"Processed {total_files_processed} files (new and re-runs).")
+    print(f"Total Confirmed Matches found: {total_new_matches}")
+    print(f"Total Discrepancies found:     {total_new_discrepancies}")
+    print(f"Total Additions found:         {total_new_additions}")
+    print("(All CSVs overwritten with these new totals)")
 
-    # Return a conventional exit code (0 = success)
     return 0
-
 
 if __name__ == "__main__":
     import sys
