@@ -8,32 +8,25 @@ from typing import Dict, Any, List, Optional
 
 # --- Configuration ---
 
-import os  # Make sure os is imported at the top of your script
-
-# Get the directory where this script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Assume the parent directory is the root of the project (e.g., 'c:\obsidian-vault')
-ROOT_DIR = os.path.dirname(SCRIPT_DIR)
-
 # --- Define Paths ---
 
-# === WSL Paths (Active) ===
-MASTER_PERSONS_FILE = r"/mnt/c/obsidian-vault/config/master_names.json"
-FIRM_ALIASES_FILE = r"/mnt/c/obsidian-vault/config/firm_aliases.json"
+# === Central Config Directory ===
+CONFIG_DIR = r"/mnt/c/obsidian-vault/config"
+
+# === Data Extraction Directory ===
 BBG_EXTRACTION_ROOT = r"/mnt/c/data_extractions/bbg_extraction"
 
 # === Windows Paths (Commented Out) ===
-# MASTER_PERSONS_FILE = r"C:\obsidian-vault\config\master_names.json"
-# FIRM_ALIASES_FILE = r"C:\obsidian-vault\config\firm_aliases.json"
+# CONFIG_DIR = r"C:\obsidian-vault\config"
 # BBG_EXTRACTION_ROOT = r"C:\data_extractions\bbg_extraction"
 
-# --- Dynamic Paths (These work for both OS) ---
+# --- Define File Paths ---
+MASTER_PERSONS_FILE = os.path.join(CONFIG_DIR, 'master_names.json')
+FIRM_ALIASES_FILE = os.path.join(CONFIG_DIR, 'firm_aliases.json')
 
+# --- Dynamic Paths (These work for both OS) ---
 # The folder where you will drop new .csv files
 NEW_DATA_DIRECTORY = os.path.join(BBG_EXTRACTION_ROOT, "new")
-
-# Output file for all *matches* (will be saved in ROOT_DIR)
-ALL_MATCHES_OUTPUT_FILE = os.path.join(ROOT_DIR, 'all_bbg_master_records.json')
 
 # --- Column Mapping ---
 
@@ -208,7 +201,7 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
     
     found_matches: List[Dict[str, Any]] = []
     found_discrepancies: List[Dict[str, Any]] = []
-    found_additions: List[Dict[str, Any]] = [] # <-- NEW LIST
+    found_additions: List[Dict[str, Any]] = []
     processed_count = 0
     match_count = 0
     discrepancy_count = 0
@@ -226,7 +219,7 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                     first = row.get('First Name', '').strip()
                     last = row.get('Last Name', '').strip()
                     if first or last:
-                       new_name = f"{first} {last}".strip()
+                        new_name = f"{first} {last}".strip()
                 if not new_name and 'Name' in row:
                     new_name = row.get('Name', '').strip()
                 if not new_name:
@@ -239,10 +232,7 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                 
                 # Check if this person exists in the master list
                 if master_records_list:
-                    # --- (EXISTING DISCREPANCY LOGIC) ---
-                    # (This block is unchanged)
-                    match_count += 1
-                    found_matches.extend(master_records_list)
+                    # --- BEGIN UPDATED MATCH/DISCREPANCY LOGIC ---
                     person_discrepancies = {}
                     has_discrepancy = False 
                     
@@ -250,26 +240,42 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                         if new_col == 'Name': continue
                         new_value = row.get(new_col)
                         
+                        # --- THIS IS THE UPDATED LOGIC BLOCK ---
                         if new_col == 'Company':
                             normalized_new_company = normalize_string(new_value)
                             canonical_new_company = alias_map.get(normalized_new_company)
-                            found_a_firm_match = False 
+                            
+                            # This list will hold only records that *truly* match name AND firm
+                            confirmed_firm_matches = [] 
                             
                             for master_record in master_records_list:
                                 master_firm = master_record.get('Firm')
                                 normalized_master_firm = normalize_string(master_firm)
                                 firm_matches = False
+                                
                                 if canonical_new_company:
+                                    # Use alias map
                                     if normalize_string(canonical_new_company) == normalized_master_firm:
                                         firm_matches = True
                                 else:
+                                    # No alias, do direct comparison
                                     if normalized_new_company == normalized_master_firm:
                                         firm_matches = True
+                                        
                                 if firm_matches:
-                                    found_a_firm_match = True
-                                    break 
+                                    # This record is a true match.
+                                    confirmed_firm_matches.append(master_record)
                             
-                            if not found_a_firm_match:
+                            # Now, check if we found any true matches
+                            if confirmed_firm_matches:
+                                # Yes! This is a real match.
+                                # Add them to the main list and count this as one "match"
+                                found_matches.extend(confirmed_firm_matches)
+                                match_count += 1
+                            
+                            else:
+                                # No. This is a name match but a firm discrepancy.
+                                # Do NOT add to found_matches. Just log the discrepancy.
                                 has_discrepancy = True
                                 all_master_firms = list(set([mr.get('Firm', 'N/A') for mr in master_records_list]))
                                 alias_check_message = ""
@@ -284,7 +290,11 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                                     'alias_check': alias_check_message,
                                     'source_file': os.path.basename(filepath)
                                 }
-                    
+                        # --- END OF UPDATED LOGIC BLOCK ---
+                        
+                        # (You can add 'elif' blocks here for 'Title', 'Location' etc. if needed)
+
+                    # This block now correctly logs discrepancies *after* the for loop
                     if has_discrepancy:
                         discrepancy_count += 1
                         first_master_record = master_records_list[0]
@@ -294,7 +304,7 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                             'Master_Record_UIDs': all_master_ids,
                             'Discrepancies': person_discrepancies
                         })
-                    # --- (END OF EXISTING DISCREPANCY LOGIC) ---
+                    # --- END OF UPDATED MATCH/DISCREPANCY LOGIC ---
                         
                 else:
                     # --- BEGIN NEW ADDITIONS LOGIC ---
@@ -327,13 +337,13 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
 
     # --- Print summary for this file ---
     print(f"\n--- Summary for {os.path.basename(filepath)} ---")
-    print(f"Processed rows:                 {processed_count}")
-    print(f"Found matches in master list:   {match_count}")
-    print(f"Persons with firm discrepancies: {discrepancy_count}")
-    print(f"New persons found (at verified firms): {len(found_additions)}") # <-- NEW
+    print(f"Processed rows:                      {processed_count}")
+    print(f"Found matches (Name + Firm):         {match_count}")
+    print(f"Persons with firm discrepancies:   {discrepancy_count}")
+    print(f"New persons found (at verified firms): {len(found_additions)}")
     print("--------------------------------" + "-" * len(os.path.basename(filepath)))
     
-    return found_matches, found_discrepancies, found_additions # <-- NEW
+    return found_matches, found_discrepancies, found_additions
 
 
 def main():
@@ -343,32 +353,32 @@ def main():
     
     if not master_map or not alias_map or not id_map:
         print("Critical Error: Could not load master persons map or firm alias maps. Exiting.")
-        return
+        return 1  # Return an error code
         
     if not os.path.exists(NEW_DATA_DIRECTORY):
         print(f"Error: 'new' data directory not found: {NEW_DATA_DIRECTORY}")
-        return
+        return 1
         
     csv_files_to_process = glob.glob(os.path.join(NEW_DATA_DIRECTORY, '*.csv'))
     
     if not csv_files_to_process:
         print(f"No .csv files found in {NEW_DATA_DIRECTORY}. Exiting.")
-        return
+        return 0  # Not an error, just nothing to do
         
     print(f"\nFound {len(csv_files_to_process)} .csv files to process...")
 
-    all_found_matches: List[Dict[str, Any]] = []
+    # --- Removed all_found_matches ---
     total_files_processed = 0
     total_new_discrepancies = 0
     total_resolved_discrepancies = 0
-    total_new_additions = 0 # <-- NEW
+    total_new_additions = 0
     
     # Process each file
     for csv_file_path in csv_files_to_process:
         
         # 1. PROCESS NEW FILE
-        matches, new_discrepancies_json, new_additions_json = process_one_file(csv_file_path, master_map, alias_map) # <-- NEW
-        all_found_matches.extend(matches)
+        # 'matches' now holds the confirmed matches for *this file only*
+        matches, new_discrepancies_json, new_additions_json = process_one_file(csv_file_path, master_map, alias_map)
         
         # --- BEGIN RECONCILIATION LOGIC ---
         
@@ -382,10 +392,12 @@ def main():
         firm_root_folder = os.path.join(BBG_EXTRACTION_ROOT, archive_folder_name)
         firm_discrepancy_folder = os.path.join(firm_root_folder, "discrepancies")
         firm_archive_folder = os.path.join(firm_root_folder, "archive")
-        firm_additions_folder = os.path.join(firm_root_folder, "additions") # <-- NEW
+        firm_additions_folder = os.path.join(firm_root_folder, "additions")
+        # --- NEW: Confirmed Matches Folder ---
+        firm_confirmed_folder = os.path.join(firm_root_folder, "confirmed_matches")
         
         # Create all folders
-        for folder in [firm_discrepancy_folder, firm_archive_folder, firm_additions_folder]: # <-- NEW
+        for folder in [firm_discrepancy_folder, firm_archive_folder, firm_additions_folder, firm_confirmed_folder]:
             if not os.path.exists(folder):
                 os.makedirs(folder)
         
@@ -415,7 +427,6 @@ def main():
                 print(f"Warning: Could not read {master_log_path}. Will create a new one. Error: {e}")
 
         # 4. RECONCILE DISCREPANCIES
-        # (This block is unchanged)
         today_str = str(date.today())
         temp_new_discrepancies = 0
         temp_resolved_discrepancies = 0
@@ -439,7 +450,6 @@ def main():
                     temp_resolved_discrepancies += 1
         
         # 5. WRITE THE NEW MASTER DISCREPANCY LOG
-        # (This block is unchanged)
         if updated_log_map:
             try:
                 sorted_log_rows = sorted(
@@ -461,17 +471,13 @@ def main():
             except Exception as e:
                 print(f"Error writing master discrepancy log {master_log_path}: {e}")
         
-        # --- BEGIN NEW SECTION: 6. PROCESS ADDITIONS ---
-        
-        # Define the master additions log path
+        # 6. PROCESS ADDITIONS
         master_additions_log_path = os.path.join(firm_additions_folder, f"{archive_folder_name}_additions.csv")
-
         additions_headers = [
             'Name', 'Company', 'Canonical_Company', 'Title', 
             'Location', 'Focus', 'Source_File', 'First_Seen'
         ]
         
-        # Load existing additions to prevent duplicates
         existing_additions = set()
         if os.path.exists(master_additions_log_path):
             try:
@@ -482,7 +488,6 @@ def main():
             except Exception as e:
                 print(f"Warning: Could not read {master_additions_log_path}. Error: {e}")
 
-        # Filter for only new additions
         new_additions_to_write = []
         for addition in new_additions_json:
             norm_name = normalize_string(addition['Name'])
@@ -491,11 +496,9 @@ def main():
                 new_additions_to_write.append(addition)
                 existing_additions.add(norm_name) # Add to set to de-dupe from same file
         
-        # Append new additions to the log
         if new_additions_to_write:
             file_exists = os.path.exists(master_additions_log_path)
             try:
-                # Open in 'a' (append) mode
                 with open(master_additions_log_path, 'a', newline='', encoding='utf-8') as f:
                     writer = csv.DictWriter(f, fieldnames=additions_headers)
                     if not file_exists:
@@ -508,9 +511,31 @@ def main():
             except Exception as e:
                 print(f"Error appending to additions CSV {master_additions_log_path}: {e}")
         
+        # --- NEW SECTION: 7. PROCESS CONFIRMED MATCHES ---
+        
+        # 'matches' is the list of master records from process_one_file
+        if matches:
+            master_matches_log_path = os.path.join(firm_confirmed_folder, f"{archive_folder_name}_matches.csv")
+            
+            # Get headers from the first record (assumes all records are the same)
+            matches_headers = list(matches[0].keys())
+            
+            try:
+                # 'w' (write/overwrite) this file. It only reflects
+                # matches found in the *last processed file*.
+                with open(master_matches_log_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=matches_headers)
+                    writer.writeheader()
+                    writer.writerows(matches)
+                
+                print(f"Successfully saved {len(matches)} confirmed matches to {master_matches_log_path}")
+
+            except Exception as e:
+                print(f"Error writing confirmed matches CSV {master_matches_log_path}: {e}")
+        
         # --- END NEW SECTION ---
 
-        # 7. ARCHIVE THE PROCESSED SOURCE FILE (was 6)
+        # 8. ARCHIVE THE PROCESSED SOURCE FILE (was 7)
         try:
             now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             _ , ext = os.path.splitext(csv_filename)
@@ -524,27 +549,15 @@ def main():
             
         # --- END RECONCILIATION LOGIC ---
 
-    # --- Save consolidated results (for matches only) ---
-    unique_matches_map = {}
-    try:
-        unique_matches_map = {m.get('ID', m.get('Name')): m for m in all_found_matches}
-        unique_matches_list = list(unique_matches_map.values())
+    # --- REMOVED Save consolidated results ---
         
-        if unique_matches_list:
-            with open(ALL_MATCHES_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-                json.dump(unique_matches_list, f, indent=2)
-            print(f"\nSuccessfully saved {len(unique_matches_list)} unique matching master records to {ALL_MATCHES_OUTPUT_FILE}")
-    except Exception as e:
-        print(f"Error saving all-matches file: {e}")
-        
-    # --- Print summary ---
     # --- Print summary ---
     print("\n--- Grand Total Summary ---")
     print(f"Processed {total_files_processed} files.")
-    print(f"Total unique master records found:  {len(unique_matches_map)}")
+    # --- REMOVED Total unique master records ---
     print(f"Total NEW discrepancies found:      {total_new_discrepancies} (appended to logs)")
     print(f"Total RESOLVED discrepancies found: {total_resolved_discrepancies} (updated in logs)")
-    print(f"Total NEW additions found:          {total_new_additions} (appended to logs)")  # <-- UPDATED
+    print(f"Total NEW additions found:          {total_new_additions} (appended to logs)")
 
     # Return a conventional exit code (0 = success)
     return 0
