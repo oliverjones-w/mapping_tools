@@ -17,6 +17,8 @@ CONFIG_ROOT = r"/mnt/c/obsidian-vault/config"
 # Root for data extractions
 BBG_EXTRACTION_ROOT = r"/mnt/c/data_extractions/bbg_extraction"
 
+FUNCTIONS_JSON_FILE = os.path.join(CONFIG_ROOT, "functions.json")
+
 # === Windows Paths (Commented Out) ===
 # CONFIG_ROOT = r"C:\obsidian-vault\config"
 # BBG_EXTRACTION_ROOT = r"C:\data_extractions\bbg_extraction"
@@ -143,3 +145,83 @@ def get_all_firm_metrics(id_to_name_map: dict) -> list:
         all_metrics.append(metrics)
     
     return all_metrics
+
+# -------- Functions mapping (Risk Taker classification) --------
+import json, os, re
+import pandas as pd
+import streamlit as st
+
+# Make sure this exists near your other paths:
+FUNCTIONS_JSON_FILE = os.path.join(CONFIG_ROOT, "functions.json")
+
+@st.cache_data(show_spinner=False)
+def load_functions_map(path: str = FUNCTIONS_JSON_FILE) -> dict:
+    """
+    Load functions.json and return a dict keyed by canonical function (lowercased).
+    Accepts:
+      - list of objects: [{"Function":"Portfolio Manager","Risk Taker":true,...}, ...]
+      - list of objects: [{"function":"PM","risk_taker":true,...}, ...]
+      - dict: {"pm": {...}, "trader": {...}} (also {"functions":[...]})
+    """
+    if not path or not os.path.exists(path):
+        return {}
+
+    try:
+        # allow // and /* */ comments if present
+        with open(path, "r", encoding="utf-8") as f:
+            txt = f.read()
+        txt = re.sub(r"/\*.*?\*/", "", txt, flags=re.S)
+        txt = re.sub(r"//.*?$", "", txt, flags=re.M)
+        raw = json.loads(txt)
+    except Exception as e:
+        st.error(f"Error reading functions.json: {e}")
+        return {}
+
+    # Unwrap common containers
+    if isinstance(raw, dict) and "functions" in raw and isinstance(raw["functions"], list):
+        raw = raw["functions"]
+
+    out = {}
+    if isinstance(raw, dict):
+        # dict form: {"pm": {...}, "trader": {...}}
+        for k, v in raw.items():
+            out[str(k).strip().lower()] = v
+    elif isinstance(raw, list):
+        # list form with possibly capitalized keys
+        for obj in raw:
+            # accept Function / function / name
+            name = (obj.get("Function") or obj.get("function") or obj.get("name") or "").strip()
+            if not name:
+                continue
+            out[name.lower()] = obj
+    return out
+
+def attach_risk_flag(df: pd.DataFrame, func_map: dict) -> pd.DataFrame:
+    """
+    Add 'Risk Taker' and 'Function Order' columns based on functions.json.
+    """
+    if df is None or df.empty or "Function" not in df.columns:
+        return df
+
+    def lookup_meta(func_val):
+        key = str(func_val or "").strip().lower()
+        meta = func_map.get(key)
+        if not isinstance(meta, dict):
+            return None, None
+        # Risk flag (any capitalization)
+        risk_v = meta.get("risk_taker", meta.get("Risk Taker", meta.get("risk taker")))
+        if isinstance(risk_v, str):
+            risk_v = risk_v.strip().lower() in ("true", "1", "yes", "y")
+        # Order (float or int)
+        order_v = meta.get("Order") or meta.get("order")
+        try:
+            order_v = float(order_v)
+        except Exception:
+            order_v = None
+        return risk_v, order_v
+
+    out = df.copy()
+    risk_vals, order_vals = zip(*[lookup_meta(v) for v in out["Function"]])
+    out["Risk Taker"] = risk_vals
+    out["Function Order"] = order_vals
+    return out

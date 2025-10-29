@@ -5,7 +5,7 @@ import altair as alt # Import Altair
 
 # --- Main Page Layout ---
 st.set_page_config(layout="wide", page_title="Dashboard")
-st.title("Data Reconciliation Dashboard")
+st.title("Global Hedge Fund Dashboard")
 
 # --- Add custom CSS to increase dataframe font size ---
 st.markdown("""
