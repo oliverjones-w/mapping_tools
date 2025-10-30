@@ -2,6 +2,11 @@ import streamlit as st
 import pandas as pd
 import config  # Import your new config file
 import altair as alt # Import Altair
+from config import FIRM_ALIASES_DATA, FUNCTIONS_JSON_DATA, MASTER_NAMES_DATA
+
+st.write("✅ firm_aliases:", len(FIRM_ALIASES_DATA))
+st.write("✅ functions:", len(FUNCTIONS_JSON_DATA))
+st.write("✅ master_names:", len(MASTER_NAMES_DATA))
 
 # --- Main Page Layout ---
 st.set_page_config(layout="wide", page_title="Dashboard")
@@ -22,7 +27,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Load data using the shared functions
-id_to_name_map = config.get_id_to_canonical_map(config.FIRM_ALIASES_FILE)
+id_to_name_map = config.get_id_to_canonical_map()
 if not id_to_name_map:
     st.error("Failed to load firm aliases. Check file path and format.")
     st.stop()

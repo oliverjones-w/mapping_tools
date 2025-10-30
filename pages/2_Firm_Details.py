@@ -183,7 +183,7 @@ def zip_firm_files(fid: str) -> bytes:
 # =========================================================
 # 4) Config + basic presence checks
 # =========================================================
-id_to_name_map = load_id_to_name_map(config.FIRM_ALIASES_FILE)
+id_to_name_map = config.get_id_to_canonical_map()
 if not id_to_name_map:
     st.error("Failed to load firm aliases. Check `config.FIRM_ALIASES_FILE` path/format.")
     st.stop()

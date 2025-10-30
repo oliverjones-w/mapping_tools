@@ -1,227 +1,214 @@
-import os
-import glob
-import json
-import pandas as pd
-import streamlit as st
+from __future__ import annotations
+import os, re, json
 from datetime import datetime
-
-# --- Configuration ---
-
-# === Hardcoded Paths (Active) ===
-# These paths point to your central data store, just like your
-# processing script. This ensures they are always looking at the same files.
-
-# Root for config files
-CONFIG_ROOT = r"/mnt/c/obsidian-vault/config"
-
-# Root for data extractions
-BBG_EXTRACTION_ROOT = r"/mnt/c/data_extractions/bbg_extraction"
-
-FUNCTIONS_JSON_FILE = os.path.join(CONFIG_ROOT, "functions.json")
-
-# === Windows Paths (Commented Out) ===
-# CONFIG_ROOT = r"C:\obsidian-vault\config"
-# BBG_EXTRACTION_ROOT = r"C:\data_extractions\bbg_extraction"
-
-
-# --- File Definitions ---
-# We build all file paths from the roots defined above
-
-# --- REMOVED ALL_MATCHES_FILE ---
-
-# Your other config files
-FIRM_ALIASES_FILE = os.path.join(CONFIG_ROOT, 'firm_aliases.json')
-MASTER_PERSONS_FILE = os.path.join(CONFIG_ROOT, 'master_names.json')
-
-
-# --- Shared Helper Functions ---
-
-@st.cache_data
-def load_json_data(filepath: str):
-    """Loads a JSON file."""
-    if not os.path.exists(filepath):
-        # We'll return None and let the page handle the error
-        return None
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        st.error(f"Error loading {filepath}: {e}")
-        return None
-
-@st.cache_data
-def get_id_to_canonical_map(aliases_file_path: str) -> dict:
-    """Loads the firm aliases and builds a map of {id: canonical_name}."""
-    aliases_data = load_json_data(aliases_file_path)
-    if not isinstance(aliases_data, list):
-        st.error(f"Aliases file at {aliases_file_path} is not a list.")
-        return {}
-    
-    id_map = {}
-    for firm_obj in aliases_data:
-        firm_id = firm_obj.get("id")
-        canonical_name = firm_obj.get("canonical")
-        if firm_id and canonical_name:
-            id_map[firm_id] = canonical_name
-    return id_map
-
-# --- REMOVED get_confirmed_counts_by_firm function ---
-
-@st.cache_data
-def get_all_firm_ids() -> list:
-    """Scans the extraction root for all firm sub-folders."""
-    try:
-        entries = os.listdir(BBG_EXTRACTION_ROOT)
-        firm_folders = [
-            entry for entry in entries
-            if os.path.isdir(os.path.join(BBG_EXTRACTION_ROOT, entry)) and entry != 'new'
-        ]
-        return sorted(firm_folders)
-    except FileNotFoundError:
-        return []
-
-@st.cache_data
-# --- UPDATED: Removed firm_count_map from arguments ---
-def get_all_firm_metrics(id_to_name_map: dict) -> list:
-    """
-    Calculates metrics for ALL firms.
-    This is for the main dashboard.
-    """
-    all_metrics = []
-    firm_ids = get_all_firm_ids()
-    
-    for firm_id in firm_ids:
-        canonical_name = id_to_name_map.get(firm_id, firm_id.replace('_', ' ').title())
-
-        metrics = {
-            "Firm": canonical_name,
-            "Firm ID": firm_id, # Store the ID for lookups
-            "Confirmed Headcount": 0, # Initialize to 0
-            "Total Additions": 0,
-            "Total Headcount": 0,
-            "Active Discrepancies": 0,
-            "Last Processed": "N/A"
-        }
-        
-        # --- NEW LOGIC: Count rows from the new _matches.csv file ---
-        confirmed_matches_file = os.path.join(BBG_EXTRACTION_ROOT, firm_id, "confirmed_matches", f"{firm_id}_matches.csv")
-        if os.path.exists(confirmed_matches_file):
-            try:
-                df_c = pd.read_csv(confirmed_matches_file)
-                metrics["Confirmed Headcount"] = df_c.shape[0]
-            except pd.errors.EmptyDataError:
-                pass # Keep 0 if file is empty
-            except Exception as e:
-                st.warning(f"Could not read matches file for {firm_id}: {e}")
-        
-        # Get Discrepancy Count
-        discrepancy_file = os.path.join(BBG_EXTRACTION_ROOT, firm_id, "discrepancies", f"{firm_id}_discrepancies.csv")
-        if os.path.exists(discrepancy_file):
-            try:
-                df_d = pd.read_csv(discrepancy_file)
-                metrics["Active Discrepancies"] = df_d[df_d['Status'] == 'Active'].shape[0]
-            except pd.errors.EmptyDataError: pass
-        
-        # Get Additions Count
-        additions_file = os.path.join(BBG_EXTRACTION_ROOT, firm_id, "additions", f"{firm_id}_additions.csv")
-        if os.path.exists(additions_file):
-            try:
-                df_a = pd.read_csv(additions_file)
-                metrics["Total Additions"] = df_a.shape[0]
-            except pd.errors.EmptyDataError: pass
-
-        # Calculate Total Headcount
-        metrics["Total Headcount"] = metrics["Confirmed Headcount"] + metrics["Total Additions"]
-
-        # Get Last Processed Time
-        archive_folder = os.path.join(BBG_EXTRACTION_ROOT, firm_id, "archive")
-        if os.path.exists(archive_folder):
-            archive_files = glob.glob(os.path.join(archive_folder, "*.csv"))
-            if archive_files:
-                latest_file = max(archive_files, key=os.path.getmtime)
-                timestamp = os.path.getmtime(latest_file)
-                metrics["Last Processed"] = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %I:%M:%S %p")
-        
-        all_metrics.append(metrics)
-    
-    return all_metrics
-
-# -------- Functions mapping (Risk Taker classification) --------
-import json, os, re
+from pathlib import Path
+from typing import Dict, List
+import boto3
 import pandas as pd
 import streamlit as st
 
-# Make sure this exists near your other paths:
-FUNCTIONS_JSON_FILE = os.path.join(CONFIG_ROOT, "functions.json")
+# =========================================================
+# 0) Paths (local folders)
+# =========================================================
+BBG_EXTRACTION_ROOT = Path(r"/mnt/c/data_extractions/bbg_extraction")
+
+# =========================================================
+# 1) S3 Config
+# =========================================================
+def _s3():
+    """Create an S3 client using credentials from Streamlit secrets."""
+    return boto3.client(
+        "s3",
+        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+        region_name=st.secrets["AWS_REGION"],
+    )
 
 @st.cache_data(show_spinner=False)
-def load_functions_map(path: str = FUNCTIONS_JSON_FILE) -> dict:
-    """
-    Load functions.json and return a dict keyed by canonical function (lowercased).
-    Accepts:
-      - list of objects: [{"Function":"Portfolio Manager","Risk Taker":true,...}, ...]
-      - list of objects: [{"function":"PM","risk_taker":true,...}, ...]
-      - dict: {"pm": {...}, "trader": {...}} (also {"functions":[...]})
-    """
-    if not path or not os.path.exists(path):
-        return {}
+def load_json_from_s3(key: str):
+    """Download and parse a JSON file from S3."""
+    s3 = _s3()
+    bucket = st.secrets["S3_BUCKET"]
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return json.loads(obj["Body"].read().decode("utf-8"))
 
-    try:
-        # allow // and /* */ comments if present
-        with open(path, "r", encoding="utf-8") as f:
-            txt = f.read()
-        txt = re.sub(r"/\*.*?\*/", "", txt, flags=re.S)
-        txt = re.sub(r"//.*?$", "", txt, flags=re.M)
-        raw = json.loads(txt)
-    except Exception as e:
-        st.error(f"Error reading functions.json: {e}")
-        return {}
+# === Load JSONs from S3 ===
+FIRM_ALIASES_DATA   = load_json_from_s3(st.secrets["S3_KEY_FIRM_ALIASES"])
+MASTER_NAMES_DATA   = load_json_from_s3(st.secrets["S3_KEY_MASTER_NAMES"])
+FUNCTIONS_JSON_DATA = load_json_from_s3(st.secrets["S3_KEY_FUNCTIONS"])
 
-    # Unwrap common containers
-    if isinstance(raw, dict) and "functions" in raw and isinstance(raw["functions"], list):
-        raw = raw["functions"]
+# =========================================================
+# 2) Constants
+# =========================================================
+SUBDIRS: Dict[str, str] = {
+    "confirmed": "confirmed_matches",
+    "discrepancies": "discrepancies",
+    "additions": "additions",
+}
+FILE_PATTERNS: Dict[str, str] = {
+    "confirmed": "{fid}_matches.csv",
+    "discrepancies": "{fid}_discrepancies.csv",
+    "additions": "{fid}_additions.csv",
+}
+TABS = ("Confirmed", "Discrepancies", "Additions")
+DATAFRAME_HEIGHT = 1200
+
+COLUMN_CONFIG = {
+    "ID": {"label": "ID", "help": "Primary identifier", "width": "small"},
+    "Title": {"label": "Title", "width": "medium"},
+    "Products": {"label": "Products", "width": "large"},
+}
+
+# =========================================================
+# 3) UI Helpers
+# =========================================================
+URLS = {
+    "linkedin": "https://www.google.com/search?q={q}+site%3Alinkedin.com",
+    "news": "https://news.google.com/search?q={q}",
+    "sec": "https://www.sec.gov/edgar/search/#/q={q}",
+    "ukco": "https://find-and-update.company-information.service.gov.uk/search?q={q}",
+    "google": "https://www.google.com/search?q={q}",
+}
+
+def link_button(href: str, label: str) -> str:
+    return f'<a href="{href}" target="_blank" class="btn-link">{label}</a>'
+
+def pill(text: str) -> str:
+    return (
+        '<span style="display:inline-block;padding:.25rem .55rem;border-radius:999px;'
+        'border:1px solid var(--muted,rgba(0,0,0,.12));margin:0 .25rem .25rem 0;'
+        f'font-size:.85rem;">{text}</span>'
+    )
+
+# =========================================================
+# 4) Aliases & Functions
+# =========================================================
+@st.cache_data(show_spinner=False)
+def get_id_to_canonical_map(data: List[dict] | None = None) -> Dict[str, str]:
+    """Build {firm_id: canonical_name} from firm_aliases.json"""
+    if data is None:
+        data = FIRM_ALIASES_DATA
+    if not isinstance(data, list):
+        st.error("Firm aliases JSON is malformed.")
+        return {}
+    out = {}
+    for firm in data:
+        fid = firm.get("id")
+        canonical = firm.get("canonical")
+        if fid and canonical:
+            out[str(fid)] = str(canonical)
+    return out
+
+@st.cache_data(show_spinner=False)
+def load_functions_map(data=None) -> Dict:
+    """Parse functions.json into a dict keyed by lowercase function name."""
+    if data is None:
+        data = FUNCTIONS_JSON_DATA
+    if isinstance(data, dict) and "functions" in data:
+        data = data["functions"]
 
     out = {}
-    if isinstance(raw, dict):
-        # dict form: {"pm": {...}, "trader": {...}}
-        for k, v in raw.items():
-            out[str(k).strip().lower()] = v
-    elif isinstance(raw, list):
-        # list form with possibly capitalized keys
-        for obj in raw:
-            # accept Function / function / name
+    if isinstance(data, dict):
+        for k, v in data.items():
+            out[str(k).lower()] = v
+    elif isinstance(data, list):
+        for obj in data:
             name = (obj.get("Function") or obj.get("function") or obj.get("name") or "").strip()
             if not name:
                 continue
             out[name.lower()] = obj
     return out
 
-def attach_risk_flag(df: pd.DataFrame, func_map: dict) -> pd.DataFrame:
+# =========================================================
+# 5) Firm discovery & metrics
+# =========================================================
+@st.cache_data(show_spinner=False)
+def get_all_firm_ids() -> List[str]:
+    """Scan BBG_EXTRACTION_ROOT for firm folders (ignores 'new')."""
+    try:
+        entries = os.listdir(BBG_EXTRACTION_ROOT)
+        firm_folders = [
+            e for e in entries
+            if (BBG_EXTRACTION_ROOT / e).is_dir() and e != "new"
+        ]
+        return sorted(firm_folders)
+    except FileNotFoundError:
+        return []
+
+@st.cache_data(show_spinner=False)
+def get_all_firm_metrics(id_to_name_map: Dict[str, str]) -> List[Dict]:
+    """Compute headcount metrics across firms."""
+    results = []
+    for fid in get_all_firm_ids():
+        canonical_name = id_to_name_map.get(fid, fid.replace("_", " ").title())
+        metrics = {
+            "Firm": canonical_name,
+            "Firm ID": fid,
+            "Confirmed Headcount": 0,
+            "Total Additions": 0,
+            "Active Discrepancies": 0,
+            "Total Headcount": 0,
+            "Last Processed": "N/A",
+        }
+
+        try:
+            confirmed = BBG_EXTRACTION_ROOT / fid / SUBDIRS["confirmed"] / FILE_PATTERNS["confirmed"].format(fid=fid)
+            if confirmed.exists():
+                df_c = pd.read_csv(confirmed)
+                metrics["Confirmed Headcount"] = df_c.shape[0]
+        except Exception:
+            pass
+
+        try:
+            discrepancies = BBG_EXTRACTION_ROOT / fid / SUBDIRS["discrepancies"] / FILE_PATTERNS["discrepancies"].format(fid=fid)
+            if discrepancies.exists():
+                df_d = pd.read_csv(discrepancies)
+                status_col = next((c for c in df_d.columns if c.lower() == "status"), None)
+                if status_col:
+                    metrics["Active Discrepancies"] = df_d[df_d[status_col].astype(str).str.lower() == "active"].shape[0]
+        except Exception:
+            pass
+
+        try:
+            additions = BBG_EXTRACTION_ROOT / fid / SUBDIRS["additions"] / FILE_PATTERNS["additions"].format(fid=fid)
+            if additions.exists():
+                df_a = pd.read_csv(additions)
+                metrics["Total Additions"] = df_a.shape[0]
+        except Exception:
+            pass
+
+        metrics["Total Headcount"] = metrics["Confirmed Headcount"] + metrics["Total Additions"]
+
+        archive_folder = BBG_EXTRACTION_ROOT / fid / "archive"
+        if archive_folder.exists():
+            archive_files = list(archive_folder.glob("*.csv"))
+            if archive_files:
+                latest = max(archive_files, key=lambda p: p.stat().st_mtime)
+                ts = latest.stat().st_mtime
+                metrics["Last Processed"] = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %I:%M:%S %p")
+
+        results.append(metrics)
+
+    return results
+
+# =========================================================
+# 5) Risk-taker flagging helper
+# =========================================================
+
+def attach_risk_flag(df: pd.DataFrame, func_map: Dict[str, Dict]) -> pd.DataFrame:
     """
-    Add 'Risk Taker' and 'Function Order' columns based on functions.json.
+    Add 'Risk Taker' and optional 'Function Order' columns to a dataframe
+    using mapping loaded from functions.json.
     """
     if df is None or df.empty or "Function" not in df.columns:
         return df
 
-    def lookup_meta(func_val):
-        key = str(func_val or "").strip().lower()
-        meta = func_map.get(key)
-        if not isinstance(meta, dict):
-            return None, None
-        # Risk flag (any capitalization)
-        risk_v = meta.get("risk_taker", meta.get("Risk Taker", meta.get("risk taker")))
-        if isinstance(risk_v, str):
-            risk_v = risk_v.strip().lower() in ("true", "1", "yes", "y")
-        # Order (float or int)
-        order_v = meta.get("Order") or meta.get("order")
-        try:
-            order_v = float(order_v)
-        except Exception:
-            order_v = None
-        return risk_v, order_v
+    df = df.copy()
+    df["Risk Taker"] = df["Function"].map(
+        lambda f: func_map.get(str(f).lower(), {}).get("Risk Taker", False)
+    )
+    df["Function Order"] = df["Function"].map(
+        lambda f: func_map.get(str(f).lower(), {}).get("Order", None)
+    )
 
-    out = df.copy()
-    risk_vals, order_vals = zip(*[lookup_meta(v) for v in out["Function"]])
-    out["Risk Taker"] = risk_vals
-    out["Function Order"] = order_vals
-    return out
+    return df
