@@ -47,92 +47,95 @@ def normalize_string(s: Optional[str]) -> str:
         return ""
     return s.strip().lower()
 
-def load_master_persons_map() -> Optional[Dict[str, List[Dict[str, Any]]]]:
+def load_master_persons_map() -> Optional[tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]]:
     """
     Loads the master persons JSON and builds a name-to-record map.
     The map's value is a LIST of person objects to handle duplicate names.
+    It also returns the complete list of persons.
     """
     if not os.path.exists(MASTER_PERSONS_FILE):
         print(f"Error: Master file not found: {MASTER_PERSONS_FILE}")
-        return None
+        return None, None # <-- Returns 2 Nones
 
     print(f"Loading master persons from {MASTER_PERSONS_FILE}...")
     try:
         with open(MASTER_PERSONS_FILE, 'r', encoding='utf-8') as f:
             persons_list = json.load(f)
         
-        # This map now holds a list of persons for each name
         person_map: Dict[str, List[Dict[str, Any]]] = {}
         total_persons = 0
+        
         for p in persons_list:
+            p['Source_Found'] = False 
+            
             name = p.get('Name')
             if name:
                 total_persons += 1
                 normalized_name = normalize_string(name)
                 if normalized_name not in person_map:
-                    person_map[normalized_name] = [] # Initialize an empty list
-                person_map[normalized_name].append(p) # Add the person to the list
+                    person_map[normalized_name] = []
+                person_map[normalized_name].append(p)
         
         print(f"Loaded {total_persons} total persons, grouped into {len(person_map)} unique names.")
-        return person_map
+        return person_map, persons_list # <-- Returns 2 values here
     except json.JSONDecodeError:
         print(f"Error: Could not decode JSON from {MASTER_PERSONS_FILE}.")
-        return None
+        return None, None # <-- Returns 2 Nones
     except Exception as e:
         print(f"An error occurred loading {MASTER_PERSONS_FILE}: {e}")
-        return None
-
-def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str], set]]:
+        return None, None # <-- Returns 2 Nones
+    
+def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str], Dict[str, set]]]:
     """
-    Loads the firm aliases JSON and builds three maps.
-    1. alias_map: 'alias' -> 'canonical_name' (for data comparison)
-    2. id_map: 'alias' -> 'id' (for folder organization)
-    3. blacklist_set: a 'normalized_alias' -> True set (for fast skipping)
+    Loads the firm aliases JSON and builds maps, including a per-firm blacklist map.
+    Returns: (alias_map, id_map, firm_blacklist_map)
     """
     if not os.path.exists(FIRM_ALIASES_FILE):
         print(f"Error: Firm aliases file not found: {FIRM_ALIASES_FILE}")
         return None, None, None
-        
+
     print(f"Loading firm aliases from {FIRM_ALIASES_FILE}...")
     try:
         with open(FIRM_ALIASES_FILE, 'r', encoding='utf-8') as f:
             firm_list = json.load(f)
-            
+
         if not isinstance(firm_list, list):
             print(f"Error: {FIRM_ALIASES_FILE} is not a JSON list as expected.")
             return None, None, None
 
         alias_map: Dict[str, str] = {}
         id_map: Dict[str, str] = {}
-        blacklist_set: set = set() # <-- NEW SET
-        
+        firm_blacklist_map: Dict[str, set] = {} # <-- NEW PER-FIRM BLACKLIST MAP
+        total_blacklist_entries = 0 # For reporting
+
         for firm_obj in firm_list:
             canonical_name = firm_obj.get("canonical")
             firm_id = firm_obj.get("id")
-            
+
             if not canonical_name or not firm_id:
                 print(f"Warning: Skipping firm entry with missing 'canonical' or 'id'.")
                 continue
-                
-            aliases = firm_obj.get("aliases", [])
-            platforms = firm_obj.get("platforms", [])
-            
-            # --- NEW BLACKLIST LOGIC ---
-            # Add all blacklisted names from this firm to the global set
+
+            # --- NEW PER-FIRM BLACKLIST LOGIC ---
+            firm_blacklist_map[firm_id] = set()
             blacklist_names = firm_obj.get("blacklist", [])
             for name in blacklist_names:
-                if not name: continue
-                blacklist_set.add(normalize_string(name))
-            # --- END NEW BLACKLIST LOGIC ---
-            
+                if name:
+                    firm_blacklist_map[firm_id].add(normalize_string(name))
+                    total_blacklist_entries += 1
+            # --- END NEW PER-FIRM BLACKLIST LOGIC ---
+
+            aliases = firm_obj.get("aliases", [])
+            platforms = firm_obj.get("platforms", [])
+
             # Create a single list of all possible names for this firm
             all_names_to_map = [canonical_name] + aliases + platforms
 
             for name in all_names_to_map:
                 if not name: continue
-                
+
                 normalized_name = normalize_string(name)
-                
+
                 # Populate the alias_map (for discrepancy checking)
                 if normalized_name not in alias_map:
                     alias_map[normalized_name] = canonical_name
@@ -147,8 +150,8 @@ def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str], se
 
         print(f"Loaded {len(alias_map)} aliases into alias_map.")
         print(f"Loaded {len(id_map)} aliases into id_map.")
-        print(f"Loaded {len(blacklist_set)} names into global blacklist_set.") # <-- NEW
-        return alias_map, id_map, blacklist_set
+        print(f"Loaded {total_blacklist_entries} total blacklist entries across {len(firm_blacklist_map)} firms.") # <-- UPDATED REPORTING
+        return alias_map, id_map, firm_blacklist_map # <-- UPDATED RETURN
         
     except json.JSONDecodeError:
         print(f"Error: Could not decode JSON from {FIRM_ALIASES_FILE}.")
@@ -156,7 +159,6 @@ def load_firm_aliases_map() -> Optional[tuple[Dict[str, str], Dict[str, str], se
     except Exception as e:
         print(f"An error occurred loading {FIRM_ALIASES_FILE}: {e}")
         return None, None, None
-
 
 def get_discrepancy_key(row_dict: Dict[str, Any]) -> tuple:
     """
@@ -220,31 +222,40 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
 
     try:
         with open(filepath, 'r', encoding='utf-8-sig') as f:
-            reader = csv.DictReader(f)
+            # Custom CSV Reader to clean headers (from previous fix)
+            reader = csv.reader(f)
+            headers = [h.strip() for h in next(reader)]
+            reader = csv.DictReader(f, fieldnames=headers)
             
             for row in reader:
                 processed_count += 1
                 
-                # --- NEW: BLACKLIST CHECK ---
-                # Get the company name from the new file
-                new_company_name = row.get('Company')
-                
-                # Check if the company is blacklisted
+                # --- NEW: Robustly extract and clean company name ---
+                new_company_name = str(row.get('Company', '')).strip()
+
+                # --- FIRM-SPECIFIC BLACKLIST CHECK ---
+                # This uses the blacklist set provided by the main function (for this firm only)
                 if new_company_name and (normalize_string(new_company_name) in blacklist_set):
-                    continue # Skip this row entirely
+                    continue
                 # --- END BLACKLIST CHECK ---
                 
                 # --- BEGIN REVISED NAME LOGIC ---
-                new_name = None
-                if 'First Name' in row and 'Last Name' in row:
-                    first = row.get('First Name', '').strip()
-                    last = row.get('Last Name', '').strip()
-                    if first or last:
-                        new_name = f"{first} {last}".strip()
-                if not new_name and 'Name' in row:
-                    new_name = row.get('Name', '').strip()
+                new_name = ""
+                
+                # 1. Try First Name + Last Name, ensuring safe string conversion
+                first = str(row.get('First Name', '')).strip()
+                last = str(row.get('Last Name', '')).strip()
+                
+                if first or last:
+                    new_name = f"{first} {last}".strip()
+                    
+                # 2. Try combined 'Name' field (if it existed)
                 if not new_name:
-                    print(f"Warning: Skipping row {processed_count} in {filepath} (no Name or First/Last Name).")
+                    new_name = str(row.get('Name', '')).strip()
+                    
+                # 3. Skip if name is still empty (Data Quality Check)
+                if not new_name:
+                    print(f"Warning: Skipping row {processed_count} in {os.path.basename(filepath)} (name fields are empty).")
                     continue
                 # --- END REVISED NAME LOGIC ---
                 
@@ -262,8 +273,7 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                         new_value = row.get(new_col)
                         
                         if new_col == 'Company':
-                            # We already know new_value (new_company_name) is not blacklisted
-                            normalized_new_company = normalize_string(new_value)
+                            normalized_new_company = normalize_string(new_company_name)
                             canonical_new_company = alias_map.get(normalized_new_company)
                             
                             confirmed_firm_matches = [] 
@@ -286,25 +296,25 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                             if confirmed_firm_matches:
                                 found_matches.extend(confirmed_firm_matches)
                                 match_count += 1
+                                for record in confirmed_firm_matches:
+                                    record['Source_Found'] = True 
                             
                             else:
                                 has_discrepancy = True
                                 all_master_firms = list(set([mr.get('Firm', 'N/A') for mr in master_records_list]))
                                 alias_check_message = ""
                                 if canonical_new_company:
-                                    alias_check_message = f"'{new_value}' (canonical: '{canonical_new_company}') matched none of: {all_master_firms}"
+                                    alias_check_message = f"'{new_company_name}' (canonical: '{canonical_new_company}') matched none of: {all_master_firms}"
                                 else:
-                                    alias_check_message = f"'{new_value}' (no alias found) matched none of: {all_master_firms}"
+                                    alias_check_message = f"'{new_company_name}' (no alias found) matched none of: {all_master_firms}"
 
                                 person_discrepancies[master_key] = {
-                                    'new_file_value': new_value,
+                                    'new_file_value': new_company_name,
                                     'master_file_values': all_master_firms,
                                     'alias_check': alias_check_message,
                                     'source_file': os.path.basename(filepath)
                                 }
                         
-                        # (You can add 'elif' blocks here for 'Title', 'Location' etc. if needed)
-
                     if has_discrepancy:
                         discrepancy_count += 1
                         first_master_record = master_records_list[0]
@@ -318,15 +328,9 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
                         
                 else:
                     # --- BEGIN NEW ADDITIONS LOGIC ---
-                    # This code is only reached if:
-                    # 1. The company was NOT in the blacklist
-                    # 2. The person's name was NOT in the master_map
-                    
-                    # We can re-use new_company_name from the blacklist check
                     normalized_new_company = normalize_string(new_company_name)
                     canonical_new_company = alias_map.get(normalized_new_company)
                     
-                    # Only add them if their firm is in our alias map
                     if canonical_new_company:
                         addition_record = {
                             'Name': new_name,
@@ -357,31 +361,29 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
     
     return found_matches, found_discrepancies, found_additions
 
-
 def main():
     # Load maps once
-    alias_map, id_map, blacklist_set = load_firm_aliases_map()
-    master_map = load_master_persons_map()
+    # --- MODIFIED: Receives firm_blacklist_map ---
+    alias_map, id_map, firm_blacklist_map = load_firm_aliases_map()
+    master_map, all_persons_list = load_master_persons_map() 
     
-    if not master_map or not alias_map or not id_map or blacklist_set is None:
-        print("Critical Error: Could not load master persons map, firm alias maps, or blacklist. Exiting.")
+    # --- MODIFIED: Check for firm_blacklist_map ---
+    if not master_map or not alias_map or not id_map or firm_blacklist_map is None or all_persons_list is None:
+        print("Critical Error: Could not load master data or alias maps. Exiting.")
         return 1
         
     if not os.path.exists(NEW_DATA_DIRECTORY):
         print(f"Error: 'new' data directory not found: {NEW_DATA_DIRECTORY}")
         return 1
         
-    # --- NEW FILE DISCOVERY LOGIC ---
-    
+    # --- FILE DISCOVERY remains the same ---
     files_to_process = []
     firms_with_new_files = set()
     
-    # 1. Get all files from the "new" folder
     new_csvs = glob.glob(os.path.join(NEW_DATA_DIRECTORY, '*.csv'))
     
     for file_path in new_csvs:
         files_to_process.append(file_path)
-        # Find the firm_id for this file to prevent re-running it
         file_name_without_ext = os.path.splitext(os.path.basename(file_path))[0]
         firm_identifier = file_name_without_ext.split('_')[0]
         normalized_base_name = normalize_string(firm_identifier)
@@ -389,13 +391,11 @@ def main():
         if archive_folder_name:
             firms_with_new_files.add(archive_folder_name)
     
-    # 2. Get all existing firm IDs from the extraction root
     all_firm_folders = [
         d for d in os.listdir(BBG_EXTRACTION_ROOT)
         if os.path.isdir(os.path.join(BBG_EXTRACTION_ROOT, d)) and d != 'new'
     ]
     
-    # 3. Find the latest archive file for firms *without* a new file
     for firm_id in all_firm_folders:
         if firm_id in firms_with_new_files:
             print(f"Skipping archive check for {firm_id} (new file found).")
@@ -411,8 +411,6 @@ def main():
             files_to_process.append(latest_archive_file)
             print(f"Queueing latest archive file for {firm_id}: {os.path.basename(latest_archive_file)}")
 
-    # --- END NEW FILE DISCOVERY LOGIC ---
-
     if not files_to_process:
         print(f"No .csv files found in {NEW_DATA_DIRECTORY} or archives. Exiting.")
         return 0
@@ -427,21 +425,15 @@ def main():
     # --- MAIN PROCESSING LOOP ---
     for csv_file_path in files_to_process:
         
-        # 1. PROCESS NEW FILE
-        print(f"\n--- Processing: {csv_file_path} ---")
-        matches, new_discrepancies_json, new_additions_json = process_one_file(
-            csv_file_path, master_map, alias_map, blacklist_set
-        )
-        
-        # 2. GET PATHS
+        # 2. GET PATHS & FIRM ID
         csv_filename = os.path.basename(csv_file_path)
         file_name_without_ext = os.path.splitext(csv_filename)[0]
-        
         is_new_file = os.path.normpath(os.path.dirname(csv_file_path)) == os.path.normpath(NEW_DATA_DIRECTORY)
         
         if is_new_file:
             firm_identifier = file_name_without_ext.split('_')[0]
         else:
+            # We rely on the folder name for archive files
             firm_identifier = os.path.basename(os.path.dirname(os.path.dirname(csv_file_path)))
         
         normalized_base_name = normalize_string(firm_identifier)
@@ -451,16 +443,33 @@ def main():
             print(f"Warning: Could not find firm ID for '{firm_identifier}'. Skipping file '{csv_filename}'.")
             continue
             
+        # --- NEW: Get the specific blacklist for this firm ID ---
+        current_blacklist_set = firm_blacklist_map.get(archive_folder_name, set())
+        
+        print(f"\n--- Processing: {csv_file_path} (ID: {archive_folder_name}) ---")
+        
+        # 1. PROCESS NEW FILE
+        # --- MODIFIED: Pass the firm-specific blacklist set ---
+        matches, new_discrepancies_json, new_additions_json = process_one_file(
+            csv_file_path, master_map, alias_map, current_blacklist_set
+        )
+
         firm_root_folder = os.path.join(BBG_EXTRACTION_ROOT, archive_folder_name)
         firm_discrepancy_folder = os.path.join(firm_root_folder, "discrepancies")
         firm_archive_folder = os.path.join(firm_root_folder, "archive")
         firm_additions_folder = os.path.join(firm_root_folder, "additions")
         firm_confirmed_folder = os.path.join(firm_root_folder, "confirmed_matches")
+        firm_missing_folder = os.path.join(firm_root_folder, "missing_records")
         
-        for folder in [firm_discrepancy_folder, firm_archive_folder, firm_additions_folder, firm_confirmed_folder]:
+        for folder in [firm_discrepancy_folder, firm_archive_folder, firm_additions_folder, firm_confirmed_folder, firm_missing_folder]:
             if not os.path.exists(folder):
                 os.makedirs(folder)
         
+        # 3, 4, 5, 6, 7, 8. WRITE LOGIC remains the same from the previous step.
+        
+        # ... (rest of the main function is identical to your previous version) ...
+        # (Writing discrepancies, additions, matches, archiving)
+
         # 3. WRITE DISCREPANCIES (OVERWRITE)
         master_log_path = os.path.join(firm_discrepancy_folder, f"{archive_folder_name}_discrepancies.csv")
         discrepancy_headers = [
@@ -476,6 +485,7 @@ def main():
                 writer.writeheader()
                 if current_findings_list:
                     writer.writerows(current_findings_list)
+            
             print(f"Successfully saved {len(current_findings_list)} discrepancies to {master_log_path} (overwrite)")
             total_new_discrepancies += len(current_findings_list)
         except Exception as e:
@@ -498,10 +508,12 @@ def main():
                 writer.writeheader()
                 if new_additions_json:
                     writer.writerows(new_additions_json)
+
             print(f"Successfully saved {len(new_additions_json)} additions to {master_additions_log_path} (overwrite)")
             total_new_additions += len(new_additions_json)
         except Exception as e:
             print(f"Error writing additions CSV {master_additions_log_path}: {e}")
+
         
         # 5. WRITE CONFIRMED MATCHES (OVERWRITE)
         if matches:
@@ -513,40 +525,63 @@ def main():
                     writer = csv.DictWriter(f, fieldnames=matches_headers)
                     writer.writeheader()
                     writer.writerows(matches)
+                
                 print(f"Successfully saved {len(matches)} confirmed matches to {master_matches_log_path} (overwrite)")
                 total_new_matches += len(matches)
+
             except Exception as e:
                 print(f"Error writing confirmed matches CSV {master_matches_log_path}: {e}")
         
-        # --- MODIFIED: 6. ARCHIVE THE PROCESSED SOURCE FILE (if it was new) ---
+        # 6. WRITE MISSING RECORDS (OVERWRITE)
+        if not is_new_file:
+            master_missing_log_path = os.path.join(firm_missing_folder, f"{archive_folder_name}_missing.csv")
+            
+            # The simplest way: look for ALL records NOT found, regardless of folder
+            missing_records = [
+                record for record in all_persons_list 
+                if record['Source_Found'] is False and record.get('Firm') # Exclude unverified records
+            ]
+
+            if missing_records:
+                headers = [k for k in missing_records[0].keys() if k != 'Source_Found']
+                
+                try:
+                    with open(master_missing_log_path, 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.DictWriter(f, fieldnames=headers)
+                        writer.writeheader()
+                        writer.writerows(missing_records)
+                    print(f"Successfully saved {len(missing_records)} missing records to {master_missing_log_path} (overwrite)")
+                except Exception as e:
+                    print(f"Error writing missing records CSV {master_missing_log_path}: {e}")
+            else:
+                 print("No master records were found to be missing.")
+
+
+        # 7. ARCHIVE THE PROCESSED SOURCE FILE (if it was new)
         if is_new_file:
             try:
                 _ , ext = os.path.splitext(csv_filename)
-                file_name_base = os.path.splitext(csv_filename)[0] # e.g., 'citadel_20251028'
+                file_name_base = os.path.splitext(csv_filename)[0]
                 firm_part = file_name_base.split('_')[0]
-                date_part = file_name_base.replace(f"{firm_part}_", "") # e.g., '20251028'
-                
-                if not date_part: # Handle case like 'citadel.csv'
+                date_part = file_name_base.replace(f"{firm_part}_", "")
+
+                if not date_part:
                     raise ValueError("No date part in filename")
-                
-                # Try to parse YYYYMMDD and format as YYYY-MM-DD
+
                 parsed_date = datetime.strptime(date_part, '%Y%m%d')
-                new_archive_filename = f"{parsed_date.strftime('%Y-%m-%d')}{ext}" # e.g., '2025-10-28.csv'
+                new_archive_filename = f"{parsed_date.strftime('%Y-%m-%d')}{ext}"
 
             except ValueError:
-                # Fallback: Can't parse date, just use the non-firm part
-                # e.g., 'citadel_extra_info_file.csv' -> 'extra_info_file.csv'
                 file_name_base = os.path.splitext(csv_filename)[0]
                 firm_part = file_name_base.split('_')[0]
                 archive_name_base = file_name_base.replace(f"{firm_part}_", "")
                 _ , ext = os.path.splitext(csv_filename)
                 
-                if not archive_name_base: # Fallback for 'citadel.csv'
+                if not archive_name_base:
                     new_archive_filename = f"{datetime.now().strftime('%Y-%m-%d')}{ext}"
                 else:
                     new_archive_filename = f"{archive_name_base}{ext}"
 
-            # Now, move the file
             try:
                 destination_path = os.path.join(firm_archive_folder, new_archive_filename)
                 
@@ -574,6 +609,7 @@ def main():
     print("(All CSVs overwritten with these new totals)")
 
     return 0
+
 
 if __name__ == "__main__":
     import sys
