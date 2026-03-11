@@ -5,20 +5,19 @@ import glob
 import shutil
 from datetime import date, datetime
 from typing import Dict, Any, List, Optional
+import warnings
 
 # --- Configuration ---
+
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # --- Define Paths ---
 
 # === Central Config Directory ===
-CONFIG_DIR = r"/mnt/c/obsidian-vault/config"
+CONFIG_DIR = r"C:\obsidian-vault\config"
 
 # === Data Extraction Directory ===
-BBG_EXTRACTION_ROOT = r"/mnt/c/data_extractions/bbg_extraction"
-
-# === Windows Paths (Commented Out) ===
-# CONFIG_DIR = r"C:\obsidian-vault\config"
-# BBG_EXTRACTION_ROOT = r"C:\data_extractions\bbg_extraction"
+BBG_EXTRACTION_ROOT = r"C:\data_extractions\bbg_extraction"
 
 # --- Define File Paths ---
 MASTER_PERSONS_FILE = os.path.join(CONFIG_DIR, 'master_names.json')
@@ -221,7 +220,7 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
     discrepancy_count = 0
 
     try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
+        with open(filepath, 'r', encoding='utf-8-sig', errors='replace') as f:
             # Custom CSV Reader to clean headers (from previous fix)
             reader = csv.reader(f)
             headers = [h.strip() for h in next(reader)]
@@ -350,14 +349,6 @@ def process_one_file(filepath: str, person_map: Dict[str, List[Dict[str, Any]]],
     except Exception as e:
         print(f"An error occurred while processing {filepath}: {e}")
         return [], [], []
-
-    # --- Print summary for this file ---
-    print(f"\n--- Summary for {os.path.basename(filepath)} ---")
-    print(f"Processed rows:                      {processed_count}")
-    print(f"Found matches (Name + Firm):         {match_count}")
-    print(f"Persons with firm discrepancies:   {discrepancy_count}")
-    print(f"New persons found (at verified firms): {len(found_additions)}")
-    print("--------------------------------" + "-" * len(os.path.basename(filepath)))
     
     return found_matches, found_discrepancies, found_additions
 
@@ -486,7 +477,6 @@ def main():
                 if current_findings_list:
                     writer.writerows(current_findings_list)
             
-            print(f"Successfully saved {len(current_findings_list)} discrepancies to {master_log_path} (overwrite)")
             total_new_discrepancies += len(current_findings_list)
         except Exception as e:
             print(f"Error writing master discrepancy log {master_log_path}: {e}")
@@ -509,7 +499,6 @@ def main():
                 if new_additions_json:
                     writer.writerows(new_additions_json)
 
-            print(f"Successfully saved {len(new_additions_json)} additions to {master_additions_log_path} (overwrite)")
             total_new_additions += len(new_additions_json)
         except Exception as e:
             print(f"Error writing additions CSV {master_additions_log_path}: {e}")
@@ -526,12 +515,12 @@ def main():
                     writer.writeheader()
                     writer.writerows(matches)
                 
-                print(f"Successfully saved {len(matches)} confirmed matches to {master_matches_log_path} (overwrite)")
                 total_new_matches += len(matches)
 
             except Exception as e:
                 print(f"Error writing confirmed matches CSV {master_matches_log_path}: {e}")
-        
+        """
+
         # 6. WRITE MISSING RECORDS (OVERWRITE)
         if not is_new_file:
             master_missing_log_path = os.path.join(firm_missing_folder, f"{archive_folder_name}_missing.csv")
@@ -555,6 +544,31 @@ def main():
                     print(f"Error writing missing records CSV {master_missing_log_path}: {e}")
             else:
                  print("No master records were found to be missing.")
+            """
+
+        # 6. WRITE MISSING RECORDS (OVERWRITE)
+        if not is_new_file:
+            master_missing_log_path = os.path.join(firm_missing_folder, f"{archive_folder_name}_missing.csv")
+            
+            missing_records = [
+                record for record in all_persons_list 
+                if record.get('Source_Found') is False and record.get('Firm')
+            ]
+
+            if missing_records:
+                # Create a clean version of the data without the 'Source_Found' helper key
+                clean_missing = [{k: v for k, v in r.items() if k != 'Source_Found'} for r in missing_records]
+                headers = list(clean_missing[0].keys())
+                
+                try:
+                    with open(master_missing_log_path, 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.DictWriter(f, fieldnames=headers)
+                        writer.writeheader()
+                        writer.writerows(clean_missing)
+                    # Removed the print statement here to save space
+                except Exception as e:
+                    print(f"Error writing missing records: {e}")
+
 
 
         # 7. ARCHIVE THE PROCESSED SOURCE FILE (if it was new)

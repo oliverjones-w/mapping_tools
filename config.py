@@ -11,18 +11,11 @@ from datetime import datetime
 # These paths point to your central data store, just like your
 # processing script. This ensures they are always looking at the same files.
 
-# Root for config files
-CONFIG_ROOT = r"/mnt/c/obsidian-vault/config"
-
-# Root for data extractions
-BBG_EXTRACTION_ROOT = r"/mnt/c/data_extractions/bbg_extraction"
+# === Windows Paths (Commented Out) ===
+CONFIG_ROOT = r"C:\obsidian-vault\config"
+BBG_EXTRACTION_ROOT = r"C:\data_extractions\bbg_extraction"
 
 FUNCTIONS_JSON_FILE = os.path.join(CONFIG_ROOT, "functions.json")
-
-# === Windows Paths (Commented Out) ===
-# CONFIG_ROOT = r"C:\obsidian-vault\config"
-# BBG_EXTRACTION_ROOT = r"C:\data_extractions\bbg_extraction"
-
 
 # --- File Definitions ---
 # We build all file paths from the roots defined above
