@@ -6,6 +6,8 @@ Both hf_map.db and ir_map.db share the same schema (produced by excel_sync_core.
   history  — append-only log: ADDED / MODIFIED / REMOVED / RESTORED
 """
 
+from __future__ import annotations
+
 import json
 import sqlite3
 from pathlib import Path
