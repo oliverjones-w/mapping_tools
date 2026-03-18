@@ -13,8 +13,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import json
+import sqlite3
 
 import db
 
@@ -42,8 +46,29 @@ def hf_summary():
 
 
 @app.get("/api/hf/records")
-def hf_records(include_inactive: bool = False):
-    return db.hf_get_all(HF_DB, include_inactive=include_inactive)
+async def hf_records(include_inactive: bool = False, limit: Optional[int] = None, offset: int = 0):
+    where = "" if include_inactive else "WHERE is_active = 1"
+    pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
+
+    def generate_json():
+        conn = sqlite3.connect(str(HF_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
+        yield "["
+        first = True
+        while True:
+            row = cur.fetchone()
+            if row is None:
+                break
+            if not first:
+                yield ","
+            yield json.dumps(dict(row), default=str)
+            first = False
+        yield "]"
+        conn.close()
+
+    return StreamingResponse(generate_json(), media_type="application/json")
 
 
 @app.get("/api/hf/records/{record_id}")
@@ -90,8 +115,29 @@ def ir_summary():
 
 
 @app.get("/api/ir/records")
-def ir_records(include_inactive: bool = False):
-    return db.ir_get_all(IR_DB, include_inactive=include_inactive)
+async def ir_records(include_inactive: bool = False, limit: Optional[int] = None, offset: int = 0):
+    where = "" if include_inactive else "WHERE is_active = 1"
+    pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
+
+    def generate_json():
+        conn = sqlite3.connect(str(IR_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
+        yield "["
+        first = True
+        while True:
+            row = cur.fetchone()
+            if row is None:
+                break
+            if not first:
+                yield ","
+            yield json.dumps(dict(row), default=str)
+            first = False
+        yield "]"
+        conn.close()
+
+    return StreamingResponse(generate_json(), media_type="application/json")
 
 
 @app.get("/api/ir/records/{record_id}")
