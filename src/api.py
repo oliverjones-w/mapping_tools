@@ -27,6 +27,9 @@ import db
 import bbg_db
 import bbg_pipeline
 
+import threading
+from queue import Queue as _Queue
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 HF_DB  = PROJECT_ROOT / "hf_map.db"
 IR_DB  = PROJECT_ROOT / "ir_map.db"
@@ -345,3 +348,133 @@ async def bbg_upload(file: UploadFile = File(...)):
         "discrepancy_count": len(disc_rows),
         "addition_count":   len(additions),
     }
+
+
+@app.post("/api/bbg/upload/stream")
+async def bbg_upload_stream(file: UploadFile = File(...)):
+    """
+    Same extraction logic as /api/bbg/upload, but returns an SSE stream of
+    real-time log messages so the client can show a live terminal view.
+    """
+    content  = await file.read()
+    filename = file.filename or "upload.csv"
+
+    q: _Queue = _Queue()
+
+    def run() -> None:
+        def log(msg: str) -> None:
+            q.put({"type": "log", "payload": msg})
+
+        try:
+            # 1. Validate CSV
+            log("Validating CSV format...")
+            ok, err = bbg_pipeline.validate_csv_columns(content)
+            if not ok:
+                q.put({"type": "error", "payload": f"Invalid CSV: {err}"}); return
+
+            import csv as _csv, io as _io
+            row_count = max(0, sum(
+                1 for _ in _csv.reader(_io.StringIO(content.decode("utf-8-sig", errors="replace")))
+            ) - 1)
+            log(f"CSV OK — {row_count} data rows detected")
+
+            # 2. Load firm registry
+            log("Loading firm registry...")
+            alias_map, id_map, blacklist_map, name_map = bbg_pipeline.load_firm_aliases()
+            log(f"Firm registry: {len(name_map)} firms, {len(id_map)} aliases")
+
+            # 3. Resolve firm from filename
+            log(f"Resolving firm from '{filename}'...")
+            firm_id = bbg_pipeline.resolve_firm_from_filename(filename, id_map)
+            if not firm_id:
+                from pathlib import Path as _P
+                stem = _P(filename).stem.split("_")[0]
+                q.put({"type": "error", "payload": (
+                    f"'{stem}' does not match any known firm key. "
+                    f"Rename the file to {{firm_key}}.csv (e.g. alphadyne.csv)."
+                )}); return
+            firm_name = name_map.get(firm_id, firm_id)
+            log(f"Firm identified: {firm_name}")
+
+            # 4. Load HF map
+            log("Loading HF map from database...")
+            person_map, _ = bbg_pipeline.load_hf_persons_from_db(HF_DB)
+            total_records = sum(len(v) for v in person_map.values())
+            log(f"HF map: {len(person_map)} unique names, {total_records} records")
+
+            # 5. Run extraction pipeline
+            log("Running extraction pipeline...")
+            blacklist = blacklist_map.get(firm_id, set())
+            confirmed, disc_json, additions = bbg_pipeline.process_csv(
+                content, filename, person_map, alias_map, blacklist
+            )
+            disc_rows = bbg_pipeline.flatten_discrepancies(disc_json)
+            log(f"Pipeline complete: {len(confirmed)} confirmed / {len(disc_rows)} discrepancies / {len(additions)} additions")
+
+            # 6. Write to database
+            log("Writing results to database...")
+            today = str(date.today())
+            run_id = bbg_db.create_run(
+                db_path=BBG_DB, firm_id=firm_id, firm_name=firm_name,
+                csv_filename=filename, source_type="upload",
+                rows_processed=len(confirmed) + len(disc_rows) + len(additions),
+                confirmed_count=len(confirmed),
+                discrepancy_count=len(disc_rows),
+                addition_count=len(additions),
+            )
+            bbg_db.insert_confirmed(BBG_DB, run_id, [
+                {
+                    "run_id": run_id, "firm_id": firm_id,
+                    "hf_record_id": r.get("id"),  "name": r.get("name"),
+                    "firm": r.get("firm"),          "title": r.get("title"),
+                    "location": r.get("location"),  "function": r.get("function"),
+                    "strategy": r.get("strategy"),  "products": r.get("products"),
+                    "reports_to": r.get("reports_to"),
+                }
+                for r in confirmed
+            ])
+            bbg_db.insert_discrepancies(BBG_DB, run_id, [
+                {**row, "run_id": run_id, "firm_id": firm_id}
+                for row in disc_rows
+            ])
+            bbg_db.insert_additions(BBG_DB, run_id, [
+                {
+                    "run_id": run_id, "firm_id": firm_id,
+                    "name": row["name"], "company": row["company"],
+                    "canonical_company": row["canonical_company"],
+                    "title": row.get("title"), "location": row.get("location"),
+                    "focus": row.get("focus"), "source_file": row["source_file"],
+                    "first_seen": today,
+                }
+                for row in additions
+            ])
+            log(f"Run #{run_id} saved to database")
+
+            q.put({"type": "done", "payload": {
+                "run_id":            run_id,
+                "firm_id":           firm_id,
+                "firm_name":         firm_name,
+                "csv_filename":      filename,
+                "rows_processed":    len(confirmed) + len(disc_rows) + len(additions),
+                "confirmed_count":   len(confirmed),
+                "discrepancy_count": len(disc_rows),
+                "addition_count":    len(additions),
+            }})
+
+        except Exception as exc:
+            q.put({"type": "error", "payload": str(exc)})
+
+    threading.Thread(target=run, daemon=True).start()
+
+    def generate():
+        while True:
+            event = q.get()
+            yield f"data: {json.dumps(event)}\n\n"
+            if event["type"] in ("done", "error"):
+                break
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
