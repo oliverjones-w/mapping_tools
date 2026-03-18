@@ -58,6 +58,14 @@ try {
     Log "Pushing ir_map.db..."
     scp "$ProjectRoot\ir_map.db" "${RemotePath}/ir_map.db"
     if ($LASTEXITCODE -ne 0) { throw "scp ir_map.db failed (exit $LASTEXITCODE)" }
+
+    if (Test-Path "$ProjectRoot\bbg_results.db") {
+        Log "Pushing bbg_results.db..."
+        scp "$ProjectRoot\bbg_results.db" "${RemotePath}/bbg_results.db"
+        if ($LASTEXITCODE -ne 0) { throw "scp bbg_results.db failed (exit $LASTEXITCODE)" }
+    } else {
+        Log "bbg_results.db not found — skipping (no extractions run yet)."
+    }
 }
 catch {
     Log "ERROR during push: $_"

@@ -13,7 +13,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from contextlib import asynccontextmanager
 from typing import Optional
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -21,12 +23,21 @@ import json
 import sqlite3
 
 import db
+import bbg_db
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 HF_DB  = PROJECT_ROOT / "hf_map.db"
 IR_DB  = PROJECT_ROOT / "ir_map.db"
+BBG_DB = PROJECT_ROOT / "bbg_results.db"
 
-app = FastAPI(title="Mapping Tools API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    bbg_db.init_db(BBG_DB)
+    yield
+
+
+app = FastAPI(title="Mapping Tools API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -172,3 +183,56 @@ def ir_search(q: str = Query(default="", min_length=1), limit: int = Query(defau
 @app.get("/api/ir/daily-changes")
 def ir_daily_changes(days: int = Query(default=60, le=365)):
     return db.get_daily_change_counts(IR_DB, days=days)
+
+
+# ---------------------------------------------------------------------------
+# BBG Extraction endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/bbg/firms")
+def bbg_firms():
+    """All firms with their latest run stats and tracking %."""
+    return bbg_db.get_firms_summary(BBG_DB)
+
+
+@app.get("/api/bbg/firms/{firm_id}/runs")
+def bbg_firm_runs(firm_id: str):
+    """Full run history for a single firm, newest first."""
+    return bbg_db.get_runs_for_firm(BBG_DB, firm_id)
+
+
+@app.get("/api/bbg/firms/{firm_id}/latest")
+def bbg_firm_latest(firm_id: str):
+    """Metadata + all data for the latest run for a firm."""
+    run_id = bbg_db.get_latest_run_id(BBG_DB, firm_id)
+    if run_id is None:
+        raise HTTPException(status_code=404, detail=f"No runs found for firm '{firm_id}'")
+    run = bbg_db.get_run(BBG_DB, run_id)
+    run["confirmed"]    = bbg_db.get_confirmed_for_run(BBG_DB, run_id)
+    run["discrepancies"] = bbg_db.get_discrepancies_for_run(BBG_DB, run_id)
+    run["additions"]    = bbg_db.get_additions_for_run(BBG_DB, run_id)
+    return run
+
+
+@app.get("/api/bbg/runs/{run_id}")
+def bbg_run(run_id: int):
+    """Metadata for a single run."""
+    run = bbg_db.get_run(BBG_DB, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@app.get("/api/bbg/runs/{run_id}/confirmed")
+def bbg_run_confirmed(run_id: int):
+    return bbg_db.get_confirmed_for_run(BBG_DB, run_id)
+
+
+@app.get("/api/bbg/runs/{run_id}/discrepancies")
+def bbg_run_discrepancies(run_id: int):
+    return bbg_db.get_discrepancies_for_run(BBG_DB, run_id)
+
+
+@app.get("/api/bbg/runs/{run_id}/additions")
+def bbg_run_additions(run_id: int):
+    return bbg_db.get_additions_for_run(BBG_DB, run_id)
