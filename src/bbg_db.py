@@ -248,3 +248,74 @@ def get_additions_for_run(db_path: Path, run_id: int) -> list[dict]:
             (run_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_delta(db_path: Path, run_id_a: int, run_id_b: int) -> dict:
+    """
+    Computes a diff between two runs (A = older/from, B = newer/to).
+
+    Matching keys:
+      confirmed     — hf_record_id (stable map reference), falls back to name
+      discrepancies — (name, discrepancy_field, new_file_value) normalised
+      additions     — (name, company) normalised
+    """
+    def _norm(s: str | None) -> str:
+        return (s or "").strip().lower()
+
+    conf_a = {r["hf_record_id"] or _norm(r["name"]): r for r in get_confirmed_for_run(db_path, run_id_a)}
+    conf_b = {r["hf_record_id"] or _norm(r["name"]): r for r in get_confirmed_for_run(db_path, run_id_b)}
+
+    def _disc_key(r: dict) -> tuple:
+        return (_norm(r["name"]), _norm(r["discrepancy_field"]), _norm(r["new_file_value"]))
+
+    disc_a = {_disc_key(r): r for r in get_discrepancies_for_run(db_path, run_id_a)}
+    disc_b = {_disc_key(r): r for r in get_discrepancies_for_run(db_path, run_id_b)}
+
+    def _add_key(r: dict) -> tuple:
+        return (_norm(r["name"]), _norm(r["company"]))
+
+    add_a = {_add_key(r): r for r in get_additions_for_run(db_path, run_id_a)}
+    add_b = {_add_key(r): r for r in get_additions_for_run(db_path, run_id_b)}
+
+    return {
+        "confirmed": {
+            "added":   [v for k, v in conf_b.items() if k not in conf_a],
+            "removed": [v for k, v in conf_a.items() if k not in conf_b],
+        },
+        "discrepancies": {
+            "added":    [v for k, v in disc_b.items() if k not in disc_a],
+            "resolved": [v for k, v in disc_a.items() if k not in disc_b],
+        },
+        "additions": {
+            "added":    [v for k, v in add_b.items() if k not in add_a],
+            "resolved": [v for k, v in add_a.items() if k not in add_b],
+        },
+    }
+
+
+def get_discrepancy_persistence(db_path: Path, firm_id: str) -> list[dict]:
+    """
+    Groups all discrepancies for a firm by (name, field, value) across every run,
+    returning how many runs each has appeared in and when it was first / last seen.
+    Ordered by run_count DESC so the most persistent signals surface first.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute("""
+            SELECT
+                d.name,
+                d.discrepancy_field,
+                d.new_file_value,
+                d.master_file_values,
+                d.alias_check_info,
+                MIN(r.run_at)       AS first_seen,
+                MAX(r.run_at)       AS last_seen,
+                COUNT(DISTINCT d.run_id) AS run_count,
+                MIN(d.run_id)       AS first_run_id,
+                MAX(d.run_id)       AS last_run_id
+            FROM bbg_discrepancies d
+            JOIN bbg_runs r ON d.run_id = r.run_id
+            WHERE d.firm_id = ?
+            GROUP BY d.name, d.discrepancy_field, d.new_file_value
+            ORDER BY run_count DESC, first_seen ASC
+        """, (firm_id,)).fetchall()
+    return [dict(r) for r in rows]

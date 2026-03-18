@@ -243,6 +243,27 @@ def bbg_run_additions(run_id: int):
     return bbg_db.get_additions_for_run(BBG_DB, run_id)
 
 
+@app.get("/api/bbg/delta")
+def bbg_delta(run_a: int = Query(...), run_b: int = Query(...)):
+    """Diff between two runs. run_a = older (from), run_b = newer (to)."""
+    meta_a = bbg_db.get_run(BBG_DB, run_a)
+    meta_b = bbg_db.get_run(BBG_DB, run_b)
+    if not meta_a or not meta_b:
+        raise HTTPException(status_code=404, detail="One or both runs not found")
+    if meta_a["firm_id"] != meta_b["firm_id"]:
+        raise HTTPException(status_code=422, detail="Runs must be from the same firm")
+    delta = bbg_db.get_delta(BBG_DB, run_a, run_b)
+    delta["run_a"] = meta_a
+    delta["run_b"] = meta_b
+    return delta
+
+
+@app.get("/api/bbg/firms/{firm_id}/discrepancy-persistence")
+def bbg_discrepancy_persistence(firm_id: str):
+    """All discrepancies for a firm grouped by persistence across runs."""
+    return bbg_db.get_discrepancy_persistence(BBG_DB, firm_id)
+
+
 @app.post("/api/bbg/upload")
 async def bbg_upload(file: UploadFile = File(...)):
     """
