@@ -279,9 +279,9 @@ async def bbg_upload(file: UploadFile = File(...)):
 
     firm_name = name_map.get(firm_id, firm_id)
 
-    # 4. Load HF map
+    # 4. Load HF map — read directly from SQLite to avoid HTTP self-call deadlock
     try:
-        person_map, _ = bbg_pipeline.load_hf_persons()
+        person_map, _ = bbg_pipeline.load_hf_persons_from_db(HF_DB)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Could not load HF map: {exc}")
 

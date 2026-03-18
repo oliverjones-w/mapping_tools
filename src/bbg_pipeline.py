@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import sqlite3
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -91,11 +92,8 @@ def load_firm_aliases() -> Tuple[Dict[str, str], Dict[str, str], Dict[str, Set[s
 
 def load_hf_persons() -> Tuple[Dict[str, List[Dict]], List[Dict]]:
     """
-    Fetches all active HF map records and returns a name-keyed lookup.
-
-    Returns:
-      person_map  — normalized name -> list of HF records
-      all_persons — flat list of all records
+    Fetches all active HF map records via HTTP and returns a name-keyed lookup.
+    Use load_hf_persons_from_db() inside the API to avoid a self-call deadlock.
     """
     url     = f"{MAPPING_API_BASE}/hf/records"
     persons = _api_get(url)
@@ -108,6 +106,31 @@ def load_hf_persons() -> Tuple[Dict[str, List[Dict]], List[Dict]]:
             person_map.setdefault(normalize(name), []).append(p)
 
     return person_map, persons
+
+
+def load_hf_persons_from_db(db_path: Path) -> Tuple[Dict[str, List[Dict]], List[Dict]]:
+    """
+    Reads all active HF map records directly from SQLite.
+
+    Drop-in replacement for load_hf_persons() that avoids the HTTP round-trip
+    (and the self-call deadlock when called from within the mapping-tools API).
+    """
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM records WHERE is_active = 1").fetchall()
+    conn.close()
+
+    person_map:  Dict[str, List[Dict]] = {}
+    all_persons: List[Dict] = []
+    for row in rows:
+        p = dict(row)
+        p["source_found"] = False
+        all_persons.append(p)
+        name = p.get("name")
+        if name:
+            person_map.setdefault(normalize(name), []).append(p)
+
+    return person_map, all_persons
 
 
 # ---------------------------------------------------------------------------
