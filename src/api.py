@@ -123,7 +123,7 @@ async def ir_records(include_inactive: bool = False, limit: Optional[int] = None
         conn = sqlite3.connect(str(IR_DB))
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
+        cur.execute(f"SELECT * FROM records {where} ORDER BY current_firm, name{pagination}")
         yield "["
         first = True
         while True:
