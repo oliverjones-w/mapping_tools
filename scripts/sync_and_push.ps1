@@ -64,7 +64,7 @@ try {
         scp "$ProjectRoot\bbg_results.db" "${RemotePath}/bbg_results.db"
         if ($LASTEXITCODE -ne 0) { throw "scp bbg_results.db failed (exit $LASTEXITCODE)" }
     } else {
-        Log "bbg_results.db not found — skipping (no extractions run yet)."
+        Log "bbg_results.db not found - skipping (no extractions run yet)."
     }
 }
 catch {

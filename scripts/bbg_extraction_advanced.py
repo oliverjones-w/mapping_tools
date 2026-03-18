@@ -56,7 +56,7 @@ BBG_EXTRACTION_ROOT = os.environ.get("BBG_ROOT", r"C:\data_extractions\bbg_extra
 NEW_DATA_DIRECTORY  = os.path.join(BBG_EXTRACTION_ROOT, "new")
 BBG_DB_PATH         = PROJECT_ROOT / "bbg_results.db"
 
-# BBG CSV column → hf_map field (hf_map uses lowercase keys from SQLite)
+# BBG CSV column -> hf_map field (hf_map uses lowercase keys from SQLite)
 COLUMN_MAPPING = {
     "Company":  "firm",
     "Title":    "title",
@@ -88,14 +88,14 @@ def load_firm_aliases_map() -> Tuple[
     Optional[Dict[str, str]],
     Optional[Dict[str, str]],
     Optional[Dict[str, Set[str]]],
-    Optional[Dict[str, str]],   # firm_id → canonical_name (for DB writes)
+    Optional[Dict[str, str]],   # firm_id -> canonical_name (for DB writes)
 ]:
     """
     Fetches firm data from BankSt API (/firms?include=aliases) and builds:
-      alias_map          — normalized name/alias/platform → canonical name
-      id_map             — normalized name/alias/platform → firm_id
-      firm_blacklist_map — firm_id → set of normalized blacklisted names
-      firm_name_map      — firm_id → canonical name (for storing in bbg_runs)
+      alias_map          — normalized name/alias/platform -> canonical name
+      id_map             — normalized name/alias/platform -> firm_id
+      firm_blacklist_map — firm_id -> set of normalized blacklisted names
+      firm_name_map      — firm_id -> canonical name (for storing in bbg_runs)
     """
     url = f"{BANKST_API_BASE}/firms?include=aliases"
     print(f"Loading firm aliases from {url} ...")
@@ -156,7 +156,7 @@ def load_firm_aliases_map() -> Tuple[
 def load_hf_persons_map() -> Tuple[Optional[Dict[str, List[Dict]]], Optional[List[Dict]]]:
     """
     Fetches all active HF map records via the mapping API and builds a
-    name → [records] lookup dict.
+    name -> [records] lookup dict.
 
     Records have lowercase keys: id, firm, name, title, location,
     function, strategy, products, reports_to
@@ -366,7 +366,7 @@ def process_one_file(
         return [], [], []
 
     print(
-        f"  → {processed_count} rows: "
+        f"  -> {processed_count} rows: "
         f"{match_count} confirmed, "
         f"{discrepancy_count} discrepancies, "
         f"{len(found_additions)} additions"
@@ -550,7 +550,7 @@ def main() -> int:
                     print(f"Warning: Archive '{new_archive_name}' already exists. Skipping move.")
                 else:
                     shutil.move(csv_file_path, dest)
-                    print(f"Archived: {csv_filename} → {new_archive_name}")
+                    print(f"Archived: {csv_filename} -> {new_archive_name}")
             except Exception as e:
                 print(f"Error archiving {csv_filename}: {e}")
         else:
