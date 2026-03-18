@@ -16,14 +16,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import json
 import sqlite3
+from datetime import date
 
 import db
 import bbg_db
+import bbg_pipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 HF_DB  = PROJECT_ROOT / "hf_map.db"
@@ -42,7 +44,7 @@ app = FastAPI(title="Mapping Tools API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -236,3 +238,110 @@ def bbg_run_discrepancies(run_id: int):
 @app.get("/api/bbg/runs/{run_id}/additions")
 def bbg_run_additions(run_id: int):
     return bbg_db.get_additions_for_run(BBG_DB, run_id)
+
+
+@app.post("/api/bbg/upload")
+async def bbg_upload(file: UploadFile = File(...)):
+    """
+    Accept a BBG CSV upload, validate it, run the extraction pipeline,
+    and write the results to bbg_results.db.
+
+    Firm is resolved from the filename: {firm_key}.csv or {firm_key}_YYYYMMDD.csv
+    The firm_key must match a known firm_id from the BankSt firm registry.
+    """
+    content  = await file.read()
+    filename = file.filename or "upload.csv"
+
+    # 1. Validate CSV format
+    ok, err = bbg_pipeline.validate_csv_columns(content)
+    if not ok:
+        raise HTTPException(status_code=422, detail=f"Invalid CSV format: {err}")
+
+    # 2. Load firm registry
+    try:
+        alias_map, id_map, blacklist_map, name_map = bbg_pipeline.load_firm_aliases()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not load firm registry: {exc}")
+
+    # 3. Resolve firm from filename
+    firm_id = bbg_pipeline.resolve_firm_from_filename(filename, id_map)
+    if not firm_id:
+        from pathlib import Path as _Path
+        stem = _Path(filename).stem.split("_")[0]
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Filename '{filename}' does not match a known firm key. "
+                f"'{stem}' was not found in the firm registry. "
+                f"Rename the file to {{firm_key}}.csv (e.g. alphadyne.csv)."
+            ),
+        )
+
+    firm_name = name_map.get(firm_id, firm_id)
+
+    # 4. Load HF map
+    try:
+        person_map, _ = bbg_pipeline.load_hf_persons()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not load HF map: {exc}")
+
+    # 5. Run pipeline
+    blacklist                      = blacklist_map.get(firm_id, set())
+    confirmed, disc_json, additions = bbg_pipeline.process_csv(
+        content, filename, person_map, alias_map, blacklist
+    )
+    disc_rows = bbg_pipeline.flatten_discrepancies(disc_json)
+    today     = str(date.today())
+
+    # 6. Write to DB
+    run_id = bbg_db.create_run(
+        db_path           = BBG_DB,
+        firm_id           = firm_id,
+        firm_name         = firm_name,
+        csv_filename      = filename,
+        source_type       = "upload",
+        rows_processed    = len(confirmed) + len(disc_rows) + len(additions),
+        confirmed_count   = len(confirmed),
+        discrepancy_count = len(disc_rows),
+        addition_count    = len(additions),
+    )
+
+    bbg_db.insert_confirmed(BBG_DB, run_id, [
+        {
+            "run_id": run_id, "firm_id": firm_id,
+            "hf_record_id": r.get("id"),  "name": r.get("name"),
+            "firm": r.get("firm"),         "title": r.get("title"),
+            "location": r.get("location"), "function": r.get("function"),
+            "strategy": r.get("strategy"), "products": r.get("products"),
+            "reports_to": r.get("reports_to"),
+        }
+        for r in confirmed
+    ])
+
+    bbg_db.insert_discrepancies(BBG_DB, run_id, [
+        {**row, "run_id": run_id, "firm_id": firm_id}
+        for row in disc_rows
+    ])
+
+    bbg_db.insert_additions(BBG_DB, run_id, [
+        {
+            "run_id": run_id,           "firm_id": firm_id,
+            "name": row["name"],         "company": row["company"],
+            "canonical_company": row["canonical_company"],
+            "title": row.get("title"),   "location": row.get("location"),
+            "focus": row.get("focus"),   "source_file": row["source_file"],
+            "first_seen": today,
+        }
+        for row in additions
+    ])
+
+    return {
+        "run_id":           run_id,
+        "firm_id":          firm_id,
+        "firm_name":        firm_name,
+        "csv_filename":     filename,
+        "rows_processed":   len(confirmed) + len(disc_rows) + len(additions),
+        "confirmed_count":  len(confirmed),
+        "discrepancy_count": len(disc_rows),
+        "addition_count":   len(additions),
+    }
