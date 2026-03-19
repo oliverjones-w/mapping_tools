@@ -243,6 +243,19 @@ def bbg_run_additions(run_id: int):
     return bbg_db.get_additions_for_run(BBG_DB, run_id)
 
 
+@app.get("/api/bbg/runs/{run_id}/csv")
+def bbg_run_csv(run_id: int):
+    """Download the original CSV that was uploaded for this run."""
+    raw, filename = bbg_db.get_csv_raw(BBG_DB, run_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="No CSV stored for this run")
+    return StreamingResponse(
+        iter([raw]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/bbg/delta")
 def bbg_delta(run_a: int = Query(...), run_b: int = Query(...)):
     """Diff between two runs. run_a = older (from), run_b = newer (to)."""
@@ -328,6 +341,7 @@ async def bbg_upload(file: UploadFile = File(...)):
         confirmed_count   = len(confirmed),
         discrepancy_count = len(disc_rows),
         addition_count    = len(additions),
+        csv_raw           = content,
     )
 
     bbg_db.insert_confirmed(BBG_DB, run_id, [
@@ -442,6 +456,7 @@ async def bbg_upload_stream(file: UploadFile = File(...)):
                 confirmed_count=len(confirmed),
                 discrepancy_count=len(disc_rows),
                 addition_count=len(additions),
+                csv_raw=content,
             )
             bbg_db.insert_confirmed(BBG_DB, run_id, [
                 {

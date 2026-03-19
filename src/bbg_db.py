@@ -39,7 +39,8 @@ def init_db(db_path: Path) -> None:
                 rows_processed    INTEGER,
                 confirmed_count   INTEGER,
                 discrepancy_count INTEGER,
-                addition_count    INTEGER
+                addition_count    INTEGER,
+                csv_raw           BLOB
             );
 
             CREATE TABLE IF NOT EXISTS bbg_confirmed (
@@ -92,6 +93,10 @@ def init_db(db_path: Path) -> None:
             CREATE INDEX IF NOT EXISTS idx_disc_run    ON bbg_discrepancies (run_id);
             CREATE INDEX IF NOT EXISTS idx_add_run     ON bbg_additions (run_id);
         """)
+        # Safe migration: add csv_raw to existing databases that predate this column.
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(bbg_runs)")}
+        if "csv_raw" not in existing:
+            conn.execute("ALTER TABLE bbg_runs ADD COLUMN csv_raw BLOB")
 
 
 # ---------------------------------------------------------------------------
@@ -108,16 +113,19 @@ def create_run(
     confirmed_count: int,
     discrepancy_count: int,
     addition_count: int,
+    csv_raw: bytes | None = None,
 ) -> int:
     run_at = datetime.now(timezone.utc).isoformat()
     with _connect(db_path) as conn:
         cur = conn.execute(
             """INSERT INTO bbg_runs
                (firm_id, firm_name, csv_filename, source_type, run_at,
-                rows_processed, confirmed_count, discrepancy_count, addition_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows_processed, confirmed_count, discrepancy_count, addition_count,
+                csv_raw)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (firm_id, firm_name, csv_filename, source_type, run_at,
-             rows_processed, confirmed_count, discrepancy_count, addition_count),
+             rows_processed, confirmed_count, discrepancy_count, addition_count,
+             csv_raw),
         )
         return cur.lastrowid
 
@@ -291,6 +299,17 @@ def get_delta(db_path: Path, run_id_a: int, run_id_b: int) -> dict:
             "resolved": [v for k, v in add_a.items() if k not in add_b],
         },
     }
+
+
+def get_csv_raw(db_path: Path, run_id: int) -> tuple[bytes, str] | tuple[None, None]:
+    """Returns (csv_bytes, csv_filename) for a run, or (None, None) if not stored."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT csv_raw, csv_filename FROM bbg_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    if row is None or row["csv_raw"] is None:
+        return None, None
+    return bytes(row["csv_raw"]), row["csv_filename"]
 
 
 def get_discrepancy_persistence(db_path: Path, firm_id: str) -> list[dict]:
