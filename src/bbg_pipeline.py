@@ -232,9 +232,15 @@ def process_csv(
             ]
 
             if firm_matches:
-                confirmed.extend(firm_matches)
+                bbg_title    = row.get("Title", "").strip() or None
+                bbg_location = row.get("Location", "").strip() or None
+                bbg_focus    = row.get("Focus", "").strip() or None
                 for r in firm_matches:
                     r["source_found"] = True
+                    r["bbg_title"]    = bbg_title
+                    r["bbg_location"] = bbg_location
+                    r["bbg_focus"]    = bbg_focus
+                confirmed.extend(firm_matches)
             else:
                 all_firms = list({r.get("firm", "N/A") for r in masters})
                 alias_msg = (

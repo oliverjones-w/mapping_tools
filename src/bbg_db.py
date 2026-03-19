@@ -55,7 +55,10 @@ def init_db(db_path: Path) -> None:
                 function     TEXT,
                 strategy     TEXT,
                 products     TEXT,
-                reports_to   TEXT
+                reports_to   TEXT,
+                bbg_title    TEXT,
+                bbg_location TEXT,
+                bbg_focus    TEXT
             );
 
             CREATE TABLE IF NOT EXISTS bbg_discrepancies (
@@ -93,10 +96,15 @@ def init_db(db_path: Path) -> None:
             CREATE INDEX IF NOT EXISTS idx_disc_run    ON bbg_discrepancies (run_id);
             CREATE INDEX IF NOT EXISTS idx_add_run     ON bbg_additions (run_id);
         """)
-        # Safe migration: add csv_raw to existing databases that predate this column.
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(bbg_runs)")}
-        if "csv_raw" not in existing:
+        # Safe migrations: add columns to existing databases that predate them.
+        runs_cols = {row[1] for row in conn.execute("PRAGMA table_info(bbg_runs)")}
+        if "csv_raw" not in runs_cols:
             conn.execute("ALTER TABLE bbg_runs ADD COLUMN csv_raw BLOB")
+
+        conf_cols = {row[1] for row in conn.execute("PRAGMA table_info(bbg_confirmed)")}
+        for col in ("bbg_title", "bbg_location", "bbg_focus"):
+            if col not in conf_cols:
+                conn.execute(f"ALTER TABLE bbg_confirmed ADD COLUMN {col} TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +145,11 @@ def insert_confirmed(db_path: Path, run_id: int, records: list[dict]) -> None:
         conn.executemany(
             """INSERT INTO bbg_confirmed
                (run_id, firm_id, hf_record_id, name, firm, title,
-                location, function, strategy, products, reports_to)
+                location, function, strategy, products, reports_to,
+                bbg_title, bbg_location, bbg_focus)
                VALUES (:run_id, :firm_id, :hf_record_id, :name, :firm, :title,
-                       :location, :function, :strategy, :products, :reports_to)""",
+                       :location, :function, :strategy, :products, :reports_to,
+                       :bbg_title, :bbg_location, :bbg_focus)""",
             records,
         )
 
@@ -299,6 +309,27 @@ def get_delta(db_path: Path, run_id_a: int, run_id_b: int) -> dict:
             "resolved": [v for k, v in add_a.items() if k not in add_b],
         },
     }
+
+
+def get_person_bbg_history(db_path: Path, hf_record_id: str) -> list[dict]:
+    """
+    Returns all confirmed appearances for a person across every run, ordered
+    oldest-first. Each row includes both master values and BBG-reported values,
+    giving a full timeline of what BBG reported for this person over time.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute("""
+            SELECT
+                c.run_id, r.firm_id, r.firm_name, r.csv_filename, r.run_at,
+                c.name, c.firm, c.title, c.location, c.function,
+                c.strategy, c.products, c.reports_to,
+                c.bbg_title, c.bbg_location, c.bbg_focus
+            FROM bbg_confirmed c
+            JOIN bbg_runs r ON c.run_id = r.run_id
+            WHERE c.hf_record_id = ?
+            ORDER BY r.run_at ASC
+        """, (hf_record_id,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_csv_raw(db_path: Path, run_id: int) -> tuple[bytes, str] | tuple[None, None]:
