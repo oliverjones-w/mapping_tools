@@ -67,7 +67,7 @@ async def hf_records(include_inactive: bool = False, limit: Optional[int] = None
     pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
 
     def generate_json():
-        conn = sqlite3.connect(str(HF_DB))
+        conn = sqlite3.connect(str(HF_DB), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
@@ -136,7 +136,7 @@ async def ir_records(include_inactive: bool = False, limit: Optional[int] = None
     pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
 
     def generate_json():
-        conn = sqlite3.connect(str(IR_DB))
+        conn = sqlite3.connect(str(IR_DB), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(f"SELECT * FROM records {where} ORDER BY current_firm, name{pagination}")
@@ -243,6 +243,19 @@ def bbg_run_additions(run_id: int):
     return bbg_db.get_additions_for_run(BBG_DB, run_id)
 
 
+@app.get("/api/bbg/persons/{hf_record_id}/bbg-history")
+def bbg_person_history(hf_record_id: str):
+    """
+    Full BBG appearance history for a person (by hf_record_id), oldest first.
+    Returns master values alongside BBG self-reported values for each run —
+    the data feed for the BBG Card on a person profile.
+    """
+    rows = bbg_db.get_person_bbg_history(BBG_DB, hf_record_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="No BBG history found for this record")
+    return rows
+
+
 @app.get("/api/bbg/runs/{run_id}/csv")
 def bbg_run_csv(run_id: int):
     """Download the original CSV that was uploaded for this run."""
@@ -347,11 +360,14 @@ async def bbg_upload(file: UploadFile = File(...)):
     bbg_db.insert_confirmed(BBG_DB, run_id, [
         {
             "run_id": run_id, "firm_id": firm_id,
-            "hf_record_id": r.get("id"),  "name": r.get("name"),
-            "firm": r.get("firm"),         "title": r.get("title"),
-            "location": r.get("location"), "function": r.get("function"),
-            "strategy": r.get("strategy"), "products": r.get("products"),
+            "hf_record_id": r.get("id"),    "name": r.get("name"),
+            "firm": r.get("firm"),           "title": r.get("title"),
+            "location": r.get("location"),   "function": r.get("function"),
+            "strategy": r.get("strategy"),   "products": r.get("products"),
             "reports_to": r.get("reports_to"),
+            "bbg_title":    r.get("bbg_title"),
+            "bbg_location": r.get("bbg_location"),
+            "bbg_focus":    r.get("bbg_focus"),
         }
         for r in confirmed
     ])
@@ -461,11 +477,14 @@ async def bbg_upload_stream(file: UploadFile = File(...)):
             bbg_db.insert_confirmed(BBG_DB, run_id, [
                 {
                     "run_id": run_id, "firm_id": firm_id,
-                    "hf_record_id": r.get("id"),  "name": r.get("name"),
-                    "firm": r.get("firm"),          "title": r.get("title"),
-                    "location": r.get("location"),  "function": r.get("function"),
-                    "strategy": r.get("strategy"),  "products": r.get("products"),
+                    "hf_record_id": r.get("id"),    "name": r.get("name"),
+                    "firm": r.get("firm"),           "title": r.get("title"),
+                    "location": r.get("location"),   "function": r.get("function"),
+                    "strategy": r.get("strategy"),   "products": r.get("products"),
                     "reports_to": r.get("reports_to"),
+                    "bbg_title":    r.get("bbg_title"),
+                    "bbg_location": r.get("bbg_location"),
+                    "bbg_focus":    r.get("bbg_focus"),
                 }
                 for r in confirmed
             ])
