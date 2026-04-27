@@ -30,10 +30,16 @@ import bbg_pipeline
 import threading
 from queue import Queue as _Queue
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-HF_DB  = PROJECT_ROOT / "hf_map.db"
-IR_DB  = PROJECT_ROOT / "ir_map.db"
-BBG_DB = PROJECT_ROOT / "bbg_results.db"
+PROJECT_ROOT    = Path(__file__).resolve().parent.parent
+HF_DB           = PROJECT_ROOT / "hf_map.db"
+IR_DB           = PROJECT_ROOT / "ir_map.db"
+BBG_DB          = PROJECT_ROOT / "bbg_results.db"
+CREDIT_DB       = PROJECT_ROOT / "credit_map.db"
+COMMODITIES_DB  = PROJECT_ROOT / "commodities_map.db"
+EQUITIES_DB     = PROJECT_ROOT / "equities_map.db"
+FX_DB           = PROJECT_ROOT / "fx_map.db"
+IB_DB           = PROJECT_ROOT / "ib_map.db"
+DIGITAL_DB      = PROJECT_ROOT / "digital_map.db"
 
 
 @asynccontextmanager
@@ -188,6 +194,432 @@ def ir_search(q: str = Query(default="", min_length=1), limit: int = Query(defau
 @app.get("/api/ir/daily-changes")
 def ir_daily_changes(days: int = Query(default=60, le=365)):
     return db.get_daily_change_counts(IR_DB, days=days)
+
+
+# ---------------------------------------------------------------------------
+# Credit Map endpoints  (credit_map.db)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/credit/summary")
+def credit_summary():
+    return db.get_summary(CREDIT_DB)
+
+
+@app.get("/api/credit/records")
+async def credit_records(include_inactive: bool = False, limit: Optional[int] = None, offset: int = 0):
+    where = "" if include_inactive else "WHERE is_active = 1"
+    pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
+
+    def generate_json():
+        conn = sqlite3.connect(str(CREDIT_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name2{pagination}")
+        yield "["
+        first = True
+        while True:
+            row = cur.fetchone()
+            if row is None:
+                break
+            if not first:
+                yield ","
+            yield json.dumps(dict(row), default=str)
+            first = False
+        yield "]"
+        conn.close()
+
+    return StreamingResponse(generate_json(), media_type="application/json")
+
+
+@app.get("/api/credit/records/{record_id}")
+def credit_record(record_id: str):
+    row = db.generic_get_one(CREDIT_DB, record_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    row["history"] = db.get_record_history(CREDIT_DB, record_id)
+    return row
+
+
+@app.get("/api/credit/firms")
+def credit_firms():
+    return db.generic_get_firms(CREDIT_DB)
+
+
+@app.get("/api/credit/changes")
+def credit_changes(limit: int = Query(default=50, le=500)):
+    return db.get_recent_changes(CREDIT_DB, limit=limit)
+
+
+@app.get("/api/credit/moves")
+def credit_moves(limit: int = Query(default=50, le=500)):
+    return db.generic_get_recent_moves(CREDIT_DB, limit=limit)
+
+
+@app.get("/api/credit/search")
+def credit_search(q: str = Query(default="", min_length=1), limit: int = Query(default=100, le=500)):
+    return db.generic_search(CREDIT_DB, q=q,
+                             search_cols=["name2", "firm", "title", "function", "group"],
+                             order_cols=("firm", "name2"), limit=limit)
+
+
+@app.get("/api/credit/daily-changes")
+def credit_daily_changes(days: int = Query(default=60, le=365)):
+    return db.get_daily_change_counts(CREDIT_DB, days=days)
+
+
+# ---------------------------------------------------------------------------
+# Commodities Map endpoints  (commodities_map.db)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/commodities/summary")
+def commodities_summary():
+    return db.get_summary(COMMODITIES_DB)
+
+
+@app.get("/api/commodities/records")
+async def commodities_records(include_inactive: bool = False, limit: Optional[int] = None, offset: int = 0):
+    where = "" if include_inactive else "WHERE is_active = 1"
+    pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
+
+    def generate_json():
+        conn = sqlite3.connect(str(COMMODITIES_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
+        yield "["
+        first = True
+        while True:
+            row = cur.fetchone()
+            if row is None:
+                break
+            if not first:
+                yield ","
+            yield json.dumps(dict(row), default=str)
+            first = False
+        yield "]"
+        conn.close()
+
+    return StreamingResponse(generate_json(), media_type="application/json")
+
+
+@app.get("/api/commodities/records/{record_id}")
+def commodities_record(record_id: str):
+    row = db.generic_get_one(COMMODITIES_DB, record_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    row["history"] = db.get_record_history(COMMODITIES_DB, record_id)
+    return row
+
+
+@app.get("/api/commodities/firms")
+def commodities_firms():
+    return db.generic_get_firms(COMMODITIES_DB)
+
+
+@app.get("/api/commodities/changes")
+def commodities_changes(limit: int = Query(default=50, le=500)):
+    return db.get_recent_changes(COMMODITIES_DB, limit=limit)
+
+
+@app.get("/api/commodities/moves")
+def commodities_moves(limit: int = Query(default=50, le=500)):
+    return db.generic_get_recent_moves(COMMODITIES_DB, limit=limit)
+
+
+@app.get("/api/commodities/search")
+def commodities_search(q: str = Query(default="", min_length=1), limit: int = Query(default=100, le=500)):
+    return db.generic_search(COMMODITIES_DB, q=q,
+                             search_cols=["name", "firm", "title", "function", "coverage", "sector"],
+                             limit=limit)
+
+
+@app.get("/api/commodities/daily-changes")
+def commodities_daily_changes(days: int = Query(default=60, le=365)):
+    return db.get_daily_change_counts(COMMODITIES_DB, days=days)
+
+
+# ---------------------------------------------------------------------------
+# Equities Map endpoints  (equities_map.db)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/equities/summary")
+def equities_summary():
+    return db.get_summary(EQUITIES_DB)
+
+
+@app.get("/api/equities/records")
+async def equities_records(include_inactive: bool = False, limit: Optional[int] = None, offset: int = 0):
+    where = "" if include_inactive else "WHERE is_active = 1"
+    pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
+
+    def generate_json():
+        conn = sqlite3.connect(str(EQUITIES_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
+        yield "["
+        first = True
+        while True:
+            row = cur.fetchone()
+            if row is None:
+                break
+            if not first:
+                yield ","
+            yield json.dumps(dict(row), default=str)
+            first = False
+        yield "]"
+        conn.close()
+
+    return StreamingResponse(generate_json(), media_type="application/json")
+
+
+@app.get("/api/equities/records/{record_id}")
+def equities_record(record_id: str):
+    row = db.generic_get_one(EQUITIES_DB, record_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    row["history"] = db.get_record_history(EQUITIES_DB, record_id)
+    return row
+
+
+@app.get("/api/equities/firms")
+def equities_firms():
+    return db.generic_get_firms(EQUITIES_DB)
+
+
+@app.get("/api/equities/changes")
+def equities_changes(limit: int = Query(default=50, le=500)):
+    return db.get_recent_changes(EQUITIES_DB, limit=limit)
+
+
+@app.get("/api/equities/moves")
+def equities_moves(limit: int = Query(default=50, le=500)):
+    return db.generic_get_recent_moves(EQUITIES_DB, limit=limit)
+
+
+@app.get("/api/equities/search")
+def equities_search(q: str = Query(default="", min_length=1), limit: int = Query(default=100, le=500)):
+    return db.generic_search(EQUITIES_DB, q=q,
+                             search_cols=["name", "firm", "title", "function", "group", "focus"],
+                             limit=limit)
+
+
+@app.get("/api/equities/daily-changes")
+def equities_daily_changes(days: int = Query(default=60, le=365)):
+    return db.get_daily_change_counts(EQUITIES_DB, days=days)
+
+
+# ---------------------------------------------------------------------------
+# FX Map endpoints  (fx_map.db)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/fx/summary")
+def fx_summary():
+    return db.get_summary(FX_DB)
+
+
+@app.get("/api/fx/records")
+async def fx_records(include_inactive: bool = False, limit: Optional[int] = None, offset: int = 0):
+    where = "" if include_inactive else "WHERE is_active = 1"
+    pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
+
+    def generate_json():
+        conn = sqlite3.connect(str(FX_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
+        yield "["
+        first = True
+        while True:
+            row = cur.fetchone()
+            if row is None:
+                break
+            if not first:
+                yield ","
+            yield json.dumps(dict(row), default=str)
+            first = False
+        yield "]"
+        conn.close()
+
+    return StreamingResponse(generate_json(), media_type="application/json")
+
+
+@app.get("/api/fx/records/{record_id}")
+def fx_record(record_id: str):
+    row = db.generic_get_one(FX_DB, record_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    row["history"] = db.get_record_history(FX_DB, record_id)
+    return row
+
+
+@app.get("/api/fx/firms")
+def fx_firms():
+    return db.generic_get_firms(FX_DB)
+
+
+@app.get("/api/fx/changes")
+def fx_changes(limit: int = Query(default=50, le=500)):
+    return db.get_recent_changes(FX_DB, limit=limit)
+
+
+@app.get("/api/fx/moves")
+def fx_moves(limit: int = Query(default=50, le=500)):
+    return db.generic_get_recent_moves(FX_DB, limit=limit)
+
+
+@app.get("/api/fx/search")
+def fx_search(q: str = Query(default="", min_length=1), limit: int = Query(default=100, le=500)):
+    return db.generic_search(FX_DB, q=q,
+                             search_cols=["name", "firm", "title", "function", "group", "focus"],
+                             limit=limit)
+
+
+@app.get("/api/fx/daily-changes")
+def fx_daily_changes(days: int = Query(default=60, le=365)):
+    return db.get_daily_change_counts(FX_DB, days=days)
+
+
+# ---------------------------------------------------------------------------
+# Investment Banking Map endpoints  (ib_map.db)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ib/summary")
+def ib_summary():
+    return db.get_summary(IB_DB)
+
+
+@app.get("/api/ib/records")
+async def ib_records(include_inactive: bool = False, limit: Optional[int] = None, offset: int = 0):
+    where = "" if include_inactive else "WHERE is_active = 1"
+    pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
+
+    def generate_json():
+        conn = sqlite3.connect(str(IB_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
+        yield "["
+        first = True
+        while True:
+            row = cur.fetchone()
+            if row is None:
+                break
+            if not first:
+                yield ","
+            yield json.dumps(dict(row), default=str)
+            first = False
+        yield "]"
+        conn.close()
+
+    return StreamingResponse(generate_json(), media_type="application/json")
+
+
+@app.get("/api/ib/records/{record_id}")
+def ib_record(record_id: str):
+    row = db.generic_get_one(IB_DB, record_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    row["history"] = db.get_record_history(IB_DB, record_id)
+    return row
+
+
+@app.get("/api/ib/firms")
+def ib_firms():
+    return db.generic_get_firms(IB_DB)
+
+
+@app.get("/api/ib/changes")
+def ib_changes(limit: int = Query(default=50, le=500)):
+    return db.get_recent_changes(IB_DB, limit=limit)
+
+
+@app.get("/api/ib/moves")
+def ib_moves(limit: int = Query(default=50, le=500)):
+    return db.generic_get_recent_moves(IB_DB, limit=limit)
+
+
+@app.get("/api/ib/search")
+def ib_search(q: str = Query(default="", min_length=1), limit: int = Query(default=100, le=500)):
+    return db.generic_search(IB_DB, q=q,
+                             search_cols=["name", "firm", "title", "group", "vertical"],
+                             limit=limit)
+
+
+@app.get("/api/ib/daily-changes")
+def ib_daily_changes(days: int = Query(default=60, le=365)):
+    return db.get_daily_change_counts(IB_DB, days=days)
+
+
+# ---------------------------------------------------------------------------
+# Digital Assets Map endpoints  (digital_map.db)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/digital/summary")
+def digital_summary():
+    return db.get_summary(DIGITAL_DB)
+
+
+@app.get("/api/digital/records")
+async def digital_records(include_inactive: bool = False, limit: Optional[int] = None, offset: int = 0):
+    where = "" if include_inactive else "WHERE is_active = 1"
+    pagination = f" LIMIT {limit} OFFSET {offset}" if limit is not None else (f" LIMIT -1 OFFSET {offset}" if offset else "")
+
+    def generate_json():
+        conn = sqlite3.connect(str(DIGITAL_DB))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM records {where} ORDER BY firm, name{pagination}")
+        yield "["
+        first = True
+        while True:
+            row = cur.fetchone()
+            if row is None:
+                break
+            if not first:
+                yield ","
+            yield json.dumps(dict(row), default=str)
+            first = False
+        yield "]"
+        conn.close()
+
+    return StreamingResponse(generate_json(), media_type="application/json")
+
+
+@app.get("/api/digital/records/{record_id}")
+def digital_record(record_id: str):
+    row = db.generic_get_one(DIGITAL_DB, record_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    row["history"] = db.get_record_history(DIGITAL_DB, record_id)
+    return row
+
+
+@app.get("/api/digital/firms")
+def digital_firms():
+    return db.generic_get_firms(DIGITAL_DB)
+
+
+@app.get("/api/digital/changes")
+def digital_changes(limit: int = Query(default=50, le=500)):
+    return db.get_recent_changes(DIGITAL_DB, limit=limit)
+
+
+@app.get("/api/digital/moves")
+def digital_moves(limit: int = Query(default=50, le=500)):
+    return db.generic_get_recent_moves(DIGITAL_DB, limit=limit)
+
+
+@app.get("/api/digital/search")
+def digital_search(q: str = Query(default="", min_length=1), limit: int = Query(default=100, le=500)):
+    return db.generic_search(DIGITAL_DB, q=q,
+                             search_cols=["name", "firm", "title", "mandate", "tag"],
+                             limit=limit)
+
+
+@app.get("/api/digital/daily-changes")
+def digital_daily_changes(days: int = Query(default=60, le=365)):
+    return db.get_daily_change_counts(DIGITAL_DB, days=days)
 
 
 # ---------------------------------------------------------------------------

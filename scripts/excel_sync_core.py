@@ -143,30 +143,17 @@ def _write_history(
 # Main sync
 # ---------------------------------------------------------------------------
 
-def sync_excel_to_sqlite(config: ExcelSyncConfig) -> None:
+def sync_dataframe_to_sqlite(df: pd.DataFrame, config: ExcelSyncConfig) -> None:
+    """
+    Sync a pre-loaded DataFrame into SQLite.
+
+    Use this when you need to preprocess the data before syncing (e.g. add a
+    synthetic ID column).  ``sync_excel_to_sqlite`` calls this internally after
+    reading the Excel file.
+    """
     now = datetime.now(timezone.utc).isoformat()
 
-    # --- Read Excel ---
-    print(f"Reading '{config.excel_path.name}' (sheet='{config.sheet_name}', header row={config.header_row})...")
-    try:
-        df = pd.read_excel(
-            config.excel_path,
-            sheet_name=config.sheet_name,
-            usecols=config.columns,
-            header=config.header_row,
-            engine="openpyxl",
-        )
-    except FileNotFoundError:
-        print(f"ERROR: File not found: {config.excel_path}")
-        return
-    except ValueError as e:
-        print(f"ERROR: {e}\nCheck that column names and header_row are correct.")
-        return
-    except Exception as e:
-        print(f"ERROR reading Excel: {e}")
-        return
-
-    # Drop entirely empty rows, then normalise column names
+    df = df.copy()
     df.dropna(how="all", inplace=True)
     norm_col_map = {col: _norm(col) for col in config.columns}
     df.rename(columns=norm_col_map, inplace=True)
@@ -177,7 +164,7 @@ def sync_excel_to_sqlite(config: ExcelSyncConfig) -> None:
     # Deduplicate on ID — keep last occurrence, warn if any dupes found
     dupes = df[id_col].dropna().duplicated(keep="last").sum()
     if dupes:
-        print(f"WARNING: {dupes} duplicate ID(s) found in Excel — keeping last occurrence of each.")
+        print(f"WARNING: {dupes} duplicate ID(s) found — keeping last occurrence of each.")
     df.drop_duplicates(subset=[id_col], keep="last", inplace=True)
 
     print(f"Loaded {len(df)} rows.")
@@ -188,7 +175,6 @@ def sync_excel_to_sqlite(config: ExcelSyncConfig) -> None:
         conn.row_factory = sqlite3.Row
         _init_db(conn, norm_cols, id_col)
 
-        # Load current active and inactive records keyed by ID
         active = {
             row[id_col]: dict(row)
             for row in conn.execute("SELECT * FROM records WHERE is_active = 1").fetchall()
@@ -199,17 +185,16 @@ def sync_excel_to_sqlite(config: ExcelSyncConfig) -> None:
         }
 
         stats = {"added": 0, "modified": 0, "removed": 0, "restored": 0, "unchanged": 0}
-        excel_ids: set[str] = set()
+        source_ids: set[str] = set()
 
         for _, row in df.iterrows():
-            # Normalise all values to strings (or None)
             record = {col: _normalize_value(row[col]) for col in norm_cols}
             record_id = record.get(id_col)
 
             if not record_id:
-                continue  # skip rows with no ID
+                continue
 
-            excel_ids.add(record_id)
+            source_ids.add(record_id)
             row_hash = _compute_hash(record, norm_cols)
 
             if record_id in active:
@@ -221,7 +206,6 @@ def sync_excel_to_sqlite(config: ExcelSyncConfig) -> None:
                     col for col in norm_cols
                     if _normalize_value(active[record_id].get(col)) != record.get(col)
                 ]
-
                 set_clause = ", ".join(f"{_q(col)} = ?" for col in norm_cols)
                 conn.execute(
                     f"UPDATE records SET {set_clause}, row_hash = ?, updated_at = ? WHERE {_q(id_col)} = ?",
@@ -249,8 +233,7 @@ def sync_excel_to_sqlite(config: ExcelSyncConfig) -> None:
                 _write_history(conn, record_id, "ADDED", None, record, norm_cols, row_hash, now)
                 stats["added"] += 1
 
-        # Mark records that disappeared from Excel as removed
-        for record_id in set(active.keys()) - excel_ids:
+        for record_id in set(active.keys()) - source_ids:
             conn.execute(
                 f"UPDATE records SET is_active = 0, updated_at = ? WHERE {_q(id_col)} = ?",
                 [now, record_id],
@@ -274,3 +257,23 @@ def sync_excel_to_sqlite(config: ExcelSyncConfig) -> None:
         f"  Unchanged: {stats['unchanged']}\n"
         f"\nDatabase: {config.db_path}"
     )
+
+
+def sync_excel_to_sqlite(config: ExcelSyncConfig) -> None:
+    print(f"Reading '{config.excel_path.name}' (sheet='{config.sheet_name}', header row={config.header_row})...")
+    try:
+        df = pd.read_excel(
+            config.excel_path,
+            sheet_name=config.sheet_name,
+            usecols=config.columns,
+            header=config.header_row,
+            engine="openpyxl",
+        )
+    except FileNotFoundError:
+        raise FileNotFoundError(f"File not found: {config.excel_path}")
+    except ValueError as e:
+        raise ValueError(f"{e}. Check that column names and header_row are correct.") from e
+    except Exception as e:
+        raise RuntimeError(f"ERROR reading Excel: {e}") from e
+
+    sync_dataframe_to_sqlite(df, config)

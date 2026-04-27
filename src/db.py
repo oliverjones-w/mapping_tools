@@ -213,6 +213,76 @@ def ir_get_recent_moves(db_path: Path, limit: int = 50) -> list[dict]:
     return results
 
 
+# ---------------------------------------------------------------------------
+# Generic helpers — reused by all new maps (credit, commodities, equities, etc.)
+# ---------------------------------------------------------------------------
+
+def generic_get_one(db_path: Path, record_id: str, id_col: str = "id") -> dict | None:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f'SELECT * FROM records WHERE "{id_col}" = ?', (record_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def generic_get_firms(db_path: Path, firm_col: str = "firm") -> list[dict]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(f"""
+            SELECT "{firm_col}" AS firm, COUNT(*) AS headcount
+            FROM records
+            WHERE is_active = 1
+              AND "{firm_col}" IS NOT NULL AND "{firm_col}" != ''
+            GROUP BY "{firm_col}"
+            ORDER BY headcount DESC, "{firm_col}"
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def generic_search(
+    db_path: Path,
+    q: str,
+    search_cols: list[str],
+    order_cols: tuple[str, ...] = ("firm", "name"),
+    limit: int = 100,
+) -> list[dict]:
+    pattern = f"%{q}%"
+    conditions = " OR ".join(f'"{col}" LIKE ?' for col in search_cols)
+    order = ", ".join(f'"{c}"' for c in order_cols)
+    with _connect(db_path) as conn:
+        rows = conn.execute(f"""
+            SELECT * FROM records
+            WHERE is_active = 1 AND ({conditions})
+            ORDER BY {order}
+            LIMIT ?
+        """, (*[pattern] * len(search_cols), limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def generic_get_recent_moves(
+    db_path: Path,
+    firm_col: str = "firm",
+    limit: int = 50,
+) -> list[dict]:
+    moves_pattern = f'%"{firm_col}"%'
+    with _connect(db_path) as conn:
+        rows = conn.execute("""
+            SELECT * FROM history
+            WHERE (changed_fields LIKE ? OR change_type = 'ADDED')
+            ORDER BY history_id DESC
+            LIMIT ?
+        """, (moves_pattern, limit)).fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        if d.get("changed_fields"):
+            try:
+                d["changed_fields"] = json.loads(d["changed_fields"])
+            except (ValueError, TypeError):
+                pass
+        results.append(d)
+    return results
+
+
 def get_daily_change_counts(db_path: Path, days: int = 60) -> list[dict]:
     """One row per calendar day with a change count; gaps filled with zero."""
     from datetime import date, timedelta
