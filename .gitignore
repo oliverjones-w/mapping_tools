@@ -11,6 +11,7 @@ __pycache__/
 # VSCode Editor Settings
 # Ignores your personal editor settings
 .vscode/
+.claude/
 
 # OS-specific files
 .DS_Store
